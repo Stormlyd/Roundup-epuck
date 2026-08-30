@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/new/ofapp">
+        <file>res/qss/ofapp.qss</file>
+    </qresource>
+</RCC>

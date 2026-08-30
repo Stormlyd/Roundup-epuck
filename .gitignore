@@ -1,0 +1,35 @@
+# Qt/qmake and CMake build output
+.build-*/
+build/
+debug/
+release/
+output/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+Makefile.Debug
+Makefile.Release
+object_script.*
+.qmake.stash
+
+# Compiler and generated Qt files
+*.o
+*.obj
+*.exe
+*.dll
+*.pdb
+*.ilk
+moc_*.cpp
+qrc_*.cpp
+
+# IDE and per-user configuration
+.qtc_clangd/
+.vscode/
+*.pro.user
+*.pro.user.*
+
+# Local test binaries and logs
+tests/*.exe
+*.log
+*.db3
