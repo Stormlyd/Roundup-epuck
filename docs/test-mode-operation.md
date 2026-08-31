@@ -2,10 +2,66 @@
 
 ## 使用前安全检查
 
+> **当前只完成本地源码与无 Qt 核心测试。禁止让轮子带载运动，直到本文“实机放行门禁”全部通过。**
+
 1. 第一次测试时架空所有机器人轮子。
 2. 确认 USB 接收器已连接，界面能看到机器人反馈。
 3. 保证机器人周围有足够空间，并让物理断电手段保持可达。
 4. 先测试一台机器人，确认左右轮方向，再测试两台和全部机器人。
+
+## CBF 离线安全边界
+
+- 控制场地固定为 `[0, 1.460] m × [0, 0.914] m`，不采用界面临时放大的尺寸。
+- 离线参数为机器人安全半径 `r_safe = 0.050 m`、机器人中心最小距离
+  `d_min = 0.100 m`。
+- 反馈年龄必须严格小于 `100 ms`；同一控制快照内的时间戳跨度不得超过
+  `50 ms`。年龄恰好为 `100 ms` 时按过期处理。
+- 名义控制器生成并限幅轮速后，全部在线且激活的机器人（包括本轮任务之外、
+  名义轮速为零的机器人）统一经过最终 CBF，再进入串口发送链路。
+- 非有限输入、反馈过期、快照不同步、初始距离越界、求解失败或离散搜索预算
+  耗尽时，系统按失败关闭处理：本轮全部活动机器人输出零速并锁存安全故障。
+- 离散搜索具有硬预算，因此可能在仍存在可行轮速时保守停车；这是安全优先的
+  活性限制，不应通过放宽最小距离或跳过 CBF 规避。
+- 后续大模型只负责顶层任务决策，强化学习只负责槽位/位置分配；两者输出均为
+  名义目标，不得绕过最终 CBF 安全层。
+
+这些数值是当前离线验证基线，不构成实机“不碰撞”证明。物理保证还取决于坐标
+标定误差、定位延迟、通信抖动、轮速映射、制动距离和底层失联看门狗。
+
+## 本地核心测试
+
+在仓库根目录执行：
+
+```bash
+test_dir="$(mktemp -d /tmp/zooid-core.XXXXXX)"
+/usr/bin/clang++ -std=c++14 -Wall -Wextra -Werror -pedantic \
+  tests/zooid_core_tests.cpp \
+  manager/ZooidMessage.cpp manager/ZooidCoordinates.cpp \
+  manager/ZooidCbfSafety.cpp manager/ZooidSpeedCodec.cpp \
+  manager/ZooidTestTargets.cpp manager/ZooidPursuitRoles.cpp \
+  manager/ZooidPursuitGeometry.cpp manager/ZooidPursuitStateMachine.cpp \
+  manager/ZooidPursuitControl.cpp manager/ZooidTestMode.cpp \
+  -o "$test_dir/zooid_core_tests"
+"$test_dir/zooid_core_tests"
+```
+
+预期输出为 `zooid core tests passed`。这只证明无 Qt 核心逻辑在当前 Mac 编译并
+通过测试，不等同于 Windows Qt 完整应用构建成功，也不等同于实机标定完成。
+
+## 实机放行门禁
+
+必须按顺序保留记录，任一项失败都禁止进入下一阶段：
+
+- [ ] 在目标 Windows/Qt/MinGW 环境执行干净的完整应用构建。
+- [ ] 抓取 USB 收发数据，核对帧长、大小端、有符号朝向、机器人 ID 和反馈时间。
+- [ ] 用场地四角及多个内部点校准 `1.460 m × 0.914 m` 坐标映射和误差上界。
+- [ ] 架空轮子标定左右轮方向、零速、轮速比例、饱和及失联看门狗。
+- [ ] 测量定位端到端延迟、抖动、丢帧和最坏反馈年龄。
+- [ ] 测量不同速度与地面条件下的最坏制动距离，并据此重新论证
+  `r_safe`、`d_min`、速度上限和 CBF 离散步长。
+- [ ] 验证物理急停和程序故障时的连续零速；操作员全程可直接断电。
+- [ ] 依次完成架空单车、落地单车、双车低速、四车低速测试；每级测试通过后
+  才允许升级，首次多车落地测试须增加实体缓冲与安全观察员。
 
 ## 界面操作
 
