@@ -1321,10 +1321,25 @@ static std::vector<PursuitRobotState> testFleet(uint64_t feedbackMs)
     return {
         testRobot(17, 0.48, 0.50, feedbackMs),
         testRobot(2, 0.80, 0.50, feedbackMs),
-        testRobot(29, 1.50, 0.80, feedbackMs),
+        testRobot(29, 1.20, 0.80, feedbackMs),
         testRobot(8, 0.64, 0.78, feedbackMs),
         testRobot(4, 0.64, 0.22, feedbackMs)
     };
+}
+
+static bool hasExactZeroCommandsForActiveFleet(
+    const std::vector<PursuitRobotState>& fleet,
+    const std::map<unsigned int, WheelCommand>& commands)
+{
+    std::size_t activeCount = 0;
+    for (const auto& robot : fleet) {
+        if (!robot.connected || !robot.activated) continue;
+        ++activeCount;
+        if (commands.count(robot.id) != 1 ||
+            commands.at(robot.id).left != 0 || commands.at(robot.id).right != 0)
+            return false;
+    }
+    return commands.size() == activeCount;
 }
 
 static void testMissionMapsArbitraryIdsAndZerosExtraRobots()
@@ -1341,10 +1356,109 @@ static void testMissionMapsArbitraryIdsAndZerosExtraRobots()
         std::cerr << "mission-role-map failed\n";
         ++failures;
     }
-    const PursuitControlOutput output = mode.update(fleet, 1100, 1.90, 1.00, 1);
-    if (output.commands.size() != 5 || output.commands.at(29).left != 0 ||
+    const PursuitControlOutput output = mode.update(
+        fleet, 1099, 1.460, 0.914, 1);
+    if (output.fault != PursuitFault::None || output.commands.size() != 5 ||
+        output.commands.at(29).left != 0 ||
         output.commands.at(29).right != 0) {
         std::cerr << "extra-robot-not-zero failed\n";
+        ++failures;
+    }
+}
+
+static void testMissionFailsClosedForUnsafeExtraActiveRobot()
+{
+    ZooidTestMode mode;
+    auto fleet = testFleet(1000);
+    for (auto& robot : fleet)
+        if (robot.id == 29) robot.pose.x = 0.049;
+    if (!mode.start(fleet, 1000)) {
+        std::cerr << "mission-unsafe-extra-start failed\n";
+        ++failures;
+        return;
+    }
+
+    const PursuitControlOutput output = mode.update(
+        fleet, 1050, 1.460, 0.914, 1);
+    if (output.fault != PursuitFault::SafetyViolation ||
+        output.event != "safety_stop" || mode.isRunning() ||
+        !hasExactZeroCommandsForActiveFleet(fleet, output.commands)) {
+        std::cerr << "mission-unsafe-extra-not-failed-closed failed\n";
+        ++failures;
+    }
+}
+
+static void testMissionCbfUsesFixedConfirmedField()
+{
+    ZooidTestMode mode;
+    auto fleet = testFleet(1000);
+    for (auto& robot : fleet)
+        if (robot.id == 29) robot.pose.x = 1.45;
+    if (!mode.start(fleet, 1000)) {
+        std::cerr << "mission-fixed-field-start failed\n";
+        ++failures;
+        return;
+    }
+
+    const PursuitControlOutput output = mode.update(
+        fleet, 1050, 1.90, 1.00, 1);
+    if (output.fault != PursuitFault::SafetyViolation ||
+        output.event != "safety_stop" || mode.isRunning() ||
+        !hasExactZeroCommandsForActiveFleet(fleet, output.commands)) {
+        std::cerr << "mission-ui-field-expanded-cbf failed\n";
+        ++failures;
+    }
+}
+
+static void testMissionUsesIntervenedCbfCommands()
+{
+    ZooidTestMode mode;
+    auto fleet = testFleet(1000);
+    for (auto& robot : fleet)
+        if (robot.id == 29) robot.pose = {0.905, 0.50, 0.0};
+    if (!mode.start(fleet, 1000)) {
+        std::cerr << "mission-cbf-intervention-start failed\n";
+        ++failures;
+        return;
+    }
+
+    const PursuitRoleMap roles = mode.roleMap();
+    PursuitWorldState world;
+    for (const auto& robot : fleet) {
+        if (robot.id == roles.targetId) world.target = robot;
+        for (std::size_t i = 0; i < roles.pursuerIds.size(); ++i)
+            if (robot.id == roles.pursuerIds[i]) world.pursuers[i] = robot;
+    }
+    world.fieldWidth = 1.460;
+    world.fieldHeight = 0.914;
+    world.stampMs = 1050;
+    world.sequence = 1;
+    PursuitSlotAssigner slots;
+    WheelCommandSmoother smoother;
+    PursuitControlOutput nominal = computePursuitCommands(
+        world, roles, PursuitPhase::Pursuit, slots, smoother);
+    nominal.commands[29] = {0, 0};
+
+    std::vector<CbfRobotState> cbfRobots;
+    for (const auto& robot : fleet)
+        cbfRobots.push_back({robot.id, robot.pose, robot.feedbackMs});
+    const ZooidCbfResult expected = applyZooidCbf(
+        cbfRobots, nominal.commands, 1050);
+    if (nominal.fault != PursuitFault::None ||
+        expected.status != ZooidCbfStatus::Intervened ||
+        zooidCbfConstraintsSatisfied(cbfRobots, nominal.commands)) {
+        std::cerr << "mission-cbf-intervention-scenario failed\n";
+        ++failures;
+        return;
+    }
+
+    const PursuitControlOutput output = mode.update(
+        fleet, 1050, 1.460, 0.914, 1);
+    if (output.fault != PursuitFault::None ||
+        sameCbfCommands(output.commands, nominal.commands) ||
+        !sameCbfCommands(output.commands, expected.commands) ||
+        !zooidCbfConstraintsSatisfied(cbfRobots, output.commands)) {
+        std::cerr << "mission-cbf-filtered-map-not-used failed\n";
         ++failures;
     }
 }
@@ -1360,14 +1474,31 @@ static void testMissionRejectsTooFewAndFaultsAtStaleBoundary()
         ++failures;
     }
 
-    ZooidTestMode mode;
+    ZooidTestMode age99Mode;
     const auto fleet = testFleet(1000);
-    mode.start(fleet, 1000);
-    if (mode.update(fleet, 1499, 1.90, 1.00, 1).fault != PursuitFault::None) {
-        std::cerr << "feedback-499ms-considered-stale failed\n";
+    age99Mode.start(fleet, 1000);
+    if (age99Mode.update(fleet, 1099, 1.460, 0.914, 1).fault !=
+        PursuitFault::None) {
+        std::cerr << "feedback-99ms-considered-stale failed\n";
         ++failures;
     }
-    if (mode.update(fleet, 1500, 1.90, 1.00, 2).fault != PursuitFault::FeedbackStale) {
+
+    ZooidTestMode age100Mode;
+    age100Mode.start(fleet, 1000);
+    const PursuitControlOutput age100 = age100Mode.update(
+        fleet, 1100, 1.460, 0.914, 1);
+    if (age100.fault != PursuitFault::SafetyViolation ||
+        age100.event != "safety_stop" || age100Mode.isRunning() ||
+        age100Mode.statusSnapshot().fault != PursuitFault::SafetyViolation ||
+        !hasExactZeroCommandsForActiveFleet(fleet, age100.commands)) {
+        std::cerr << "feedback-100ms-not-safety-violation failed\n";
+        ++failures;
+    }
+
+    ZooidTestMode staleMode;
+    staleMode.start(fleet, 1000);
+    if (staleMode.update(fleet, 1500, 1.460, 0.914, 1).fault !=
+        PursuitFault::FeedbackStale) {
         std::cerr << "feedback-500ms-not-stale failed\n";
         ++failures;
     }
@@ -1380,7 +1511,7 @@ static void testMissionFreezesRolesAndDoesNotReplaceMissingParticipant()
     mode.start(fleet, 1000);
     fleet.push_back(testRobot(1, 1.20, 0.50, 1100));
     for (auto& robot : fleet) robot.feedbackMs = 1100;
-    mode.update(fleet, 1100, 1.90, 1.00, 1);
+    mode.update(fleet, 1100, 1.460, 0.914, 1);
     if (mode.roleMap().targetId != 2) {
         std::cerr << "late-lower-id-reassigned-target failed\n";
         ++failures;
@@ -1388,7 +1519,7 @@ static void testMissionFreezesRolesAndDoesNotReplaceMissingParticipant()
     fleet.erase(std::remove_if(fleet.begin(), fleet.end(), [](const PursuitRobotState& robot) {
         return robot.id == 4;
     }), fleet.end());
-    if (mode.update(fleet, 1200, 1.90, 1.00, 2).fault !=
+    if (mode.update(fleet, 1200, 1.460, 0.914, 2).fault !=
         PursuitFault::ParticipantMissing) {
         std::cerr << "newcomer-replaced-missing-participant failed\n";
         ++failures;
@@ -1402,7 +1533,7 @@ static void testMissionStopIsIdempotentAndRestartRebuildsRoles()
     mode.start(fleet, 1000);
     mode.stop();
     mode.stop();
-    const auto stopped = mode.update(fleet, 1100, 1.90, 1.00, 1);
+    const auto stopped = mode.update(fleet, 1100, 1.460, 0.914, 1);
     for (const auto& entry : stopped.commands) {
         if (entry.second.left != 0 || entry.second.right != 0) {
             std::cerr << "repeated-stop-not-zero failed\n";
@@ -1468,6 +1599,9 @@ int main()
     testCoordinatedControllerUsesRealIdsAndStopsWhenCaptured();
     testPursuitCommandsLeadAMovingTarget();
     testMissionMapsArbitraryIdsAndZerosExtraRobots();
+    testMissionFailsClosedForUnsafeExtraActiveRobot();
+    testMissionCbfUsesFixedConfirmedField();
+    testMissionUsesIntervenedCbfCommands();
     testMissionRejectsTooFewAndFaultsAtStaleBoundary();
     testMissionFreezesRolesAndDoesNotReplaceMissingParticipant();
     testMissionStopIsIdempotentAndRestartRebuildsRoles();

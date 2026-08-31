@@ -1,5 +1,6 @@
 #include "ZooidTestMode.h"
 
+#include "ZooidCbfSafety.h"
 #include "ZooidPursuitGeometry.h"
 
 #include <algorithm>
@@ -147,6 +148,18 @@ PursuitControlOutput ZooidTestMode::update(
     for (const auto& robot : robots)
         if (robot.connected && robot.activated && !containsId(participants, robot.id))
             output.commands[robot.id] = {0, 0};
+
+    std::vector<CbfRobotState> cbfRobots;
+    for (const auto& robot : robots)
+        if (robot.connected && robot.activated)
+            cbfRobots.push_back({robot.id, robot.pose, robot.feedbackMs});
+    const ZooidCbfConfig cbfConfig;
+    const ZooidCbfResult cbfResult = applyZooidCbf(
+        cbfRobots, output.commands, nowMs, cbfConfig);
+    if (cbfResult.status != ZooidCbfStatus::Safe &&
+        cbfResult.status != ZooidCbfStatus::Intervened)
+        return faultOutput(PursuitFault::SafetyViolation, robots);
+    output.commands = cbfResult.commands;
 
     status_.phase = phaseResult.phase;
     status_.fault = PursuitFault::None;

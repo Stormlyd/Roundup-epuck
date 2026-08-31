@@ -224,18 +224,6 @@ PursuitControlOutput computePursuitCommands(
     for (std::size_t i = 0; i < 3; ++i)
     {
         PursuitTwist twist = driveToward(world.pursuers[i].pose, goals[i], maxLinear);
-        const double gx = goals[i].x - world.pursuers[i].pose.x;
-        const double gy = goals[i].y - world.pursuers[i].pose.y;
-        for (std::size_t j = 0; j < 3; ++j)
-        {
-            if (i == j) continue;
-            const double separation = distanceBetween(world.pursuers[i].pose,
-                                                      world.pursuers[j].pose);
-            const double px = world.pursuers[j].pose.x - world.pursuers[i].pose.x;
-            const double py = world.pursuers[j].pose.y - world.pursuers[i].pose.y;
-            if (separation < 0.14 && gx * px + gy * py > 0.0)
-                twist.linear = 0.0;
-        }
         output.commands[roles.pursuerIds[i]] = smoother.smooth(
             roles.pursuerIds[i], differentialDrive(twist));
     }

@@ -27,6 +27,7 @@ enum class PursuitFault
     FeedbackStale,
     InvalidFeedback,
     InvalidGeometry,
+    SafetyViolation,
     ReceiverError,
     ManualStop
 };

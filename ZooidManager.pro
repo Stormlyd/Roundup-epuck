@@ -54,6 +54,8 @@ SOURCES += main.cpp\
     manager/ZooidSimulator.cpp \
     manager/ZooidCharge.cpp \
     manager/ZooidTestMode.cpp \
+    manager/ZooidCoordinates.cpp \
+    manager/ZooidCbfSafety.cpp \
     manager/ZooidSpeedCodec.cpp \
     manager/ZooidTestTargets.cpp \
     manager/ZooidPursuitRoles.cpp \
@@ -103,6 +105,8 @@ HEADERS  += \
     manager/ZooidSimulator.h \
     manager/ZooidCharge.h   \
     manager/ZooidTestMode.h \
+    manager/ZooidCoordinates.h \
+    manager/ZooidCbfSafety.h \
     manager/ZooidSpeedCodec.h \
     manager/ZooidTestTargets.h \
     manager/ZooidWheelCommand.h \
