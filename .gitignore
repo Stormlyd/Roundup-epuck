@@ -26,6 +26,7 @@ qrc_*.cpp
 # IDE and per-user configuration
 .qtc_clangd/
 .vscode/
+.worktrees/
 *.pro.user
 *.pro.user.*
 
