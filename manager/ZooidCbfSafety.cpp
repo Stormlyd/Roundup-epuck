@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <utility>
 
 namespace
 {
@@ -25,7 +26,6 @@ struct Halfspace
     std::vector<ConstraintTerm> terms;
     double lowerBound = 0.0;
     double normSquared = 0.0;
-    double l1Norm = 0.0;
 };
 
 double effectiveTolerance(const ZooidCbfConfig& config)
@@ -113,15 +113,11 @@ bool validTiming(const std::vector<CbfRobotState>& robots,
 InputValidity validateGeometry(const std::vector<CbfRobotState>& robots,
                                const ZooidCbfConfig& config)
 {
-    const double scale = std::max(
-        1.0, std::max(config.fieldWidth, config.fieldHeight));
-    const double boundaryTolerance =
-        64.0 * std::numeric_limits<double>::epsilon() * scale;
     for (const CbfRobotState& robot : robots) {
-        if (robot.pose.x < config.safeRadius - boundaryTolerance ||
-            robot.pose.x > config.fieldWidth - config.safeRadius + boundaryTolerance ||
-            robot.pose.y < config.safeRadius - boundaryTolerance ||
-            robot.pose.y > config.fieldHeight - config.safeRadius + boundaryTolerance) {
+        if (robot.pose.x < config.safeRadius ||
+            robot.pose.x > config.fieldWidth - config.safeRadius ||
+            robot.pose.y < config.safeRadius ||
+            robot.pose.y > config.fieldHeight - config.safeRadius) {
             return InputValidity::Unsafe;
         }
     }
@@ -135,10 +131,7 @@ InputValidity validateGeometry(const std::vector<CbfRobotState>& robots,
             const double dy = robots[i].pose.y - robots[j].pose.y;
             const double distanceSquared = dx * dx + dy * dy;
             if (!std::isfinite(distanceSquared)) return InputValidity::Invalid;
-            const double distanceTolerance =
-                128.0 * std::numeric_limits<double>::epsilon() *
-                std::max(1.0, std::max(distanceSquared, minimumDistanceSquared));
-            if (distanceSquared < minimumDistanceSquared - distanceTolerance)
+            if (distanceSquared < minimumDistanceSquared)
                 return InputValidity::Unsafe;
         }
     }
@@ -156,10 +149,8 @@ bool appendHalfspace(std::vector<Halfspace>& constraints,
     for (const ConstraintTerm& term : constraint.terms) {
         if (!std::isfinite(term.coefficient)) return false;
         constraint.normSquared += term.coefficient * term.coefficient;
-        constraint.l1Norm += std::abs(term.coefficient);
     }
-    if (!std::isfinite(constraint.normSquared) ||
-        !std::isfinite(constraint.l1Norm)) {
+    if (!std::isfinite(constraint.normSquared)) {
         return false;
     }
     constraints.push_back(std::move(constraint));
@@ -340,6 +331,103 @@ bool reconstructCommands(
     return true;
 }
 
+void searchDiscreteCombinations(
+    const std::vector<CbfRobotState>& robots,
+    const std::map<unsigned int, WheelCommand>& nominal,
+    const std::vector<double>& nominalCommonModes,
+    const std::vector<std::vector<double>>& candidates,
+    const ZooidCbfConfig& config,
+    std::size_t index,
+    double cost,
+    std::vector<double>& current,
+    bool& found,
+    double& bestCost,
+    std::vector<double>& bestCommonModes,
+    std::map<unsigned int, WheelCommand>& bestCommands)
+{
+    if (found && cost > bestCost) return;
+    if (index == robots.size()) {
+        std::map<unsigned int, WheelCommand> commands;
+        if (!reconstructCommands(
+                robots, nominal, nominalCommonModes, current, commands) ||
+            !zooidCbfConstraintsSatisfied(robots, commands, config)) {
+            return;
+        }
+        if (!found || cost < bestCost ||
+            (cost == bestCost && std::lexicographical_compare(
+                current.begin(), current.end(),
+                bestCommonModes.begin(), bestCommonModes.end()))) {
+            found = true;
+            bestCost = cost;
+            bestCommonModes = current;
+            bestCommands = std::move(commands);
+        }
+        return;
+    }
+
+    for (double candidate : candidates[index]) {
+        const double difference = candidate - nominalCommonModes[index];
+        const double nextCost = cost + difference * difference;
+        if (!std::isfinite(nextCost)) continue;
+        current[index] = candidate;
+        searchDiscreteCombinations(
+            robots, nominal, nominalCommonModes, candidates, config,
+            index + 1, nextCost, current, found, bestCost,
+            bestCommonModes, bestCommands);
+    }
+}
+
+bool findDiscreteCommands(
+    const std::vector<CbfRobotState>& robots,
+    const std::map<unsigned int, WheelCommand>& nominal,
+    const std::vector<double>& nominalCommonModes,
+    const std::vector<double>& projected,
+    const ZooidCbfConfig& config,
+    std::map<unsigned int, WheelCommand>& commands)
+{
+    std::vector<std::vector<double>> candidates(robots.size());
+    for (std::size_t i = 0; i < robots.size(); ++i) {
+        const double nominalCommon = nominalCommonModes[i];
+        const auto addShift = [&](double shift) {
+            const double candidate = nominalCommon + shift;
+            if (std::isfinite(candidate) &&
+                std::find(candidates[i].begin(), candidates[i].end(), candidate) ==
+                    candidates[i].end()) {
+                candidates[i].push_back(candidate);
+            }
+        };
+        if (i < projected.size() && std::isfinite(projected[i])) {
+            const double projectedShift = projected[i] - nominalCommon;
+            addShift(std::floor(projectedShift));
+            addShift(std::ceil(projectedShift));
+        }
+        addShift(-1.0);
+        addShift(0.0);
+        addShift(1.0);
+        addShift(std::floor(-nominalCommon));
+        addShift(std::ceil(-nominalCommon));
+        std::sort(candidates[i].begin(), candidates[i].end(),
+                  [nominalCommon](double first, double second) {
+                      const double firstDifference = first - nominalCommon;
+                      const double secondDifference = second - nominalCommon;
+                      const double firstCost = firstDifference * firstDifference;
+                      const double secondCost = secondDifference * secondDifference;
+                      return firstCost != secondCost
+                          ? firstCost < secondCost
+                          : first < second;
+                  });
+    }
+
+    bool found = false;
+    double bestCost = std::numeric_limits<double>::infinity();
+    std::vector<double> current(robots.size(), 0.0);
+    std::vector<double> bestCommonModes;
+    searchDiscreteCombinations(
+        robots, nominal, nominalCommonModes, candidates, config,
+        0, 0.0, current, found, bestCost, bestCommonModes, commands);
+    return found;
+}
+
 bool sameCommands(const std::map<unsigned int, WheelCommand>& first,
                   const std::map<unsigned int, WheelCommand>& second)
 {
@@ -351,18 +439,6 @@ bool sameCommands(const std::map<unsigned int, WheelCommand>& first,
             found->second.right != entry.second.right) {
             return false;
         }
-    }
-    return true;
-}
-
-bool makeConservative(const std::vector<Halfspace>& constraints,
-                      double tolerance,
-                      std::vector<Halfspace>& conservative)
-{
-    conservative = constraints;
-    for (Halfspace& constraint : conservative) {
-        constraint.lowerBound += 0.5 * constraint.l1Norm + tolerance;
-        if (!std::isfinite(constraint.lowerBound)) return false;
     }
     return true;
 }
@@ -413,25 +489,20 @@ ZooidCbfResult applyZooidCbf(
     if (!buildConstraints(sorted, differentials, config, constraints))
         return zeroResult(robots, ZooidCbfStatus::SolverFailure);
 
-    std::vector<double> projected;
-    std::map<unsigned int, WheelCommand> commands;
-    if (!projectDykstra(nominalCommonModes, constraints, config, projected) ||
-        !reconstructCommands(
-            sorted, nominal, nominalCommonModes, projected, commands)) {
-        return zeroResult(robots, ZooidCbfStatus::SolverFailure);
+    if (constraintsSatisfied(
+            nominalCommonModes, constraints, effectiveTolerance(config))) {
+        ZooidCbfResult result;
+        result.status = ZooidCbfStatus::Safe;
+        result.commands = nominal;
+        return result;
     }
 
-    if (!zooidCbfConstraintsSatisfied(sorted, commands, config)) {
-        std::vector<Halfspace> conservative;
-        if (!makeConservative(
-                constraints, effectiveTolerance(config), conservative) ||
-            !projectDykstra(
-                nominalCommonModes, conservative, config, projected) ||
-            !reconstructCommands(
-                sorted, nominal, nominalCommonModes, projected, commands) ||
-            !zooidCbfConstraintsSatisfied(sorted, commands, config)) {
-            return zeroResult(robots, ZooidCbfStatus::SolverFailure);
-        }
+    std::vector<double> projected;
+    std::map<unsigned int, WheelCommand> commands;
+    projectDykstra(nominalCommonModes, constraints, config, projected);
+    if (!findDiscreteCommands(
+            sorted, nominal, nominalCommonModes, projected, config, commands)) {
+        return zeroResult(robots, ZooidCbfStatus::SolverFailure);
     }
 
     ZooidCbfResult result;

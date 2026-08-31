@@ -204,7 +204,7 @@ static void testCbfRepairsIntegerRoundingForClosingRobots()
     const ZooidCbfResult result = applyZooidCbf(robots, nominal, 1000);
     if (result.status != ZooidCbfStatus::Intervened ||
         result.commands.at(1).left != 9 || result.commands.at(1).right != 9 ||
-        result.commands.at(2).left != 9 || result.commands.at(2).right != 9 ||
+        result.commands.at(2).left != 10 || result.commands.at(2).right != 10 ||
         !zooidCbfConstraintsSatisfied(robots, result.commands)) {
         std::cerr << "cbf-closing-integer-repair failed\n";
         ++failures;
@@ -412,7 +412,7 @@ static void testCbfIsInvariantToRobotInputOrder()
     }
 }
 
-static void testCbfFailsClosedOnUnsafeBoundaryAndSolverLimit()
+static void testCbfFailsClosedOnUnsafeBoundaryAndRepairsSolverLimit()
 {
     const std::vector<CbfRobotState> outside = {
         cbfRobot(1, 0.049, 0.400)
@@ -432,9 +432,20 @@ static void testCbfFailsClosedOnUnsafeBoundaryAndSolverLimit()
     ZooidCbfConfig config;
     config.maximumIterations = 1;
     const ZooidCbfResult limited = applyZooidCbf(edge, nominal, 1000, config);
-    if (limited.status != ZooidCbfStatus::SolverFailure ||
-        !allCbfCommandsZero(edge, limited)) {
-        std::cerr << "cbf-solver-limit-not-failed-closed failed\n";
+    if (limited.status != ZooidCbfStatus::Intervened ||
+        !zooidCbfConstraintsSatisfied(edge, limited.commands, config)) {
+        std::cerr << "cbf-solver-limit-safe-repair-failed failed\n";
+        ++failures;
+    }
+
+    const std::vector<CbfRobotState> centre = {
+        cbfRobot(1, 0.700, 0.400)
+    };
+    const ZooidCbfResult impossible = applyZooidCbf(
+        centre, {{1, {-1001, 1001}}}, 1000);
+    if (impossible.status != ZooidCbfStatus::SolverFailure ||
+        !allCbfCommandsZero(centre, impossible)) {
+        std::cerr << "cbf-impossible-differential-not-failed-closed failed\n";
         ++failures;
     }
 }
@@ -458,6 +469,181 @@ static void testCbfToleranceCannotDisableSafetyChecks()
         !zooidCbfConstraintsSatisfied(robots, result.commands) ||
         result.commands.at(1).left + result.commands.at(1).right < 0) {
         std::cerr << "cbf-large-tolerance-disabled-safety failed\n";
+        ++failures;
+    }
+}
+
+static void testCbfRejectsOneUlpOutsideEveryGeometryBoundary()
+{
+    const ZooidCbfConfig config;
+    struct UnsafePose
+    {
+        const char* name;
+        double x;
+        double y;
+    };
+    const UnsafePose poses[] = {
+        {"left", std::nextafter(config.safeRadius, 0.0), 0.400},
+        {"right", std::nextafter(
+            config.fieldWidth - config.safeRadius,
+            std::numeric_limits<double>::infinity()), 0.400},
+        {"bottom", 0.700, std::nextafter(config.safeRadius, 0.0)},
+        {"top", 0.700, std::nextafter(
+            config.fieldHeight - config.safeRadius,
+            std::numeric_limits<double>::infinity())}
+    };
+    for (const UnsafePose& pose : poses) {
+        const std::vector<CbfRobotState> robot = {
+            cbfRobot(1, pose.x, pose.y)
+        };
+        const ZooidCbfResult result = applyZooidCbf(
+            robot, {{1, {0, 0}}}, 1000);
+        if (result.status != ZooidCbfStatus::UnsafeState ||
+            !allCbfCommandsZero(robot, result)) {
+            std::cerr << "cbf-one-ulp-" << pose.name
+                      << "-boundary-accepted failed\n";
+            ++failures;
+        }
+    }
+
+    const double belowMinimum = std::nextafter(config.minimumDistance, 0.0);
+    const std::vector<CbfRobotState> tooClose = {
+        cbfRobot(1, 0.500, 0.400),
+        cbfRobot(2, 0.500 + belowMinimum, 0.400)
+    };
+    const ZooidCbfResult pairResult = applyZooidCbf(
+        tooClose, {{1, {0, 0}}, {2, {0, 0}}}, 1000);
+    if (pairResult.status != ZooidCbfStatus::UnsafeState ||
+        !allCbfCommandsZero(tooClose, pairResult)) {
+        std::cerr << "cbf-one-ulp-pair-distance-accepted failed\n";
+        ++failures;
+    }
+}
+
+static void testCbfFindsNearestSafeDiscreteCommonModes()
+{
+    const std::vector<CbfRobotState> robot = {
+        cbfRobot(1, ZooidFieldWidth - 0.050 - 0.0002, 0.400, 0.0)
+    };
+    const std::map<unsigned int, WheelCommand> nominal = {{1, {100, 100}}};
+    const ZooidCbfResult result = applyZooidCbf(robot, nominal, 1000);
+    if (result.status != ZooidCbfStatus::Intervened ||
+        result.commands.at(1).left != 0 || result.commands.at(1).right != 0 ||
+        !zooidCbfConstraintsSatisfied(robot, result.commands)) {
+        std::cerr << "cbf-nearest-safe-discrete-mode-not-found failed\n";
+        ++failures;
+    }
+}
+
+static void testCbfSelectsGlobalDiscreteMinimumAfterSafeRounding()
+{
+    const double pi = 3.14159265358979323846;
+    const double distance = 0.10486274893838447;
+    const std::vector<CbfRobotState> robots = {
+        cbfRobot(1, 0.500, 0.400, 0.0),
+        cbfRobot(2, 0.500 + distance, 0.400, pi)
+    };
+    const std::map<unsigned int, WheelCommand> nominal = {
+        {1, {100, 100}},
+        {2, {100, 100}}
+    };
+    const ZooidCbfResult result = applyZooidCbf(robots, nominal, 1000);
+    if (result.status != ZooidCbfStatus::Intervened ||
+        result.commands.at(1).left != 9 || result.commands.at(1).right != 9 ||
+        result.commands.at(2).left != 10 || result.commands.at(2).right != 10 ||
+        !zooidCbfConstraintsSatisfied(robots, result.commands)) {
+        std::cerr << "cbf-safe-rounded-result-bypassed-global-search failed\n";
+        ++failures;
+    }
+}
+
+static void testCbfDefaultIterationLimitUsesSafeDiscreteFallback()
+{
+    const std::vector<CbfRobotState> robots = {
+        cbfRobot(1, 0.93192102221448025, 0.80648788199801957,
+                 -1.3461053082025618),
+        cbfRobot(2, 1.1686888322073097, 0.84066160057204686,
+                 -1.8593957100235687),
+        cbfRobot(3, 0.82483007874150582, 0.76736035204330888,
+                 -2.761617569876464),
+        cbfRobot(4, 1.0599897198089197, 0.80540797895200056,
+                 -2.8786832856282221)
+    };
+    const std::map<unsigned int, WheelCommand> nominal = {
+        {1, {528, 412}},
+        {2, {-450, 314}},
+        {3, {-360, 120}},
+        {4, {-418, -864}}
+    };
+    const ZooidCbfResult result = applyZooidCbf(robots, nominal, 1000);
+    if (result.status != ZooidCbfStatus::Intervened ||
+        !zooidCbfConstraintsSatisfied(robots, result.commands)) {
+        std::cerr << "cbf-default-iteration-safe-fallback failed\n";
+        ++failures;
+        return;
+    }
+    for (const auto& entry : nominal) {
+        const WheelCommand command = result.commands.at(entry.first);
+        if (command.right - command.left !=
+            entry.second.right - entry.second.left) {
+            std::cerr << "cbf-default-iteration-differential-changed failed\n";
+            ++failures;
+        }
+    }
+}
+
+static void testCbfConstrainsAllSixFourRobotPairs()
+{
+    const double pi = 3.14159265358979323846;
+    const unsigned int ids[] = {10, 20, 30, 40};
+    const PursuitPose separated[] = {
+        {0.200, 0.200, 0.0},
+        {1.200, 0.200, 0.0},
+        {0.200, 0.700, 0.0},
+        {1.200, 0.700, 0.0}
+    };
+    for (std::size_t first = 0; first < 4; ++first) {
+        for (std::size_t second = first + 1; second < 4; ++second) {
+            std::vector<CbfRobotState> robots;
+            std::map<unsigned int, WheelCommand> nominal;
+            for (std::size_t i = 0; i < 4; ++i) {
+                robots.push_back({ids[i], separated[i], 1000});
+                nominal[ids[i]] = {};
+            }
+            robots[first].pose = {0.500, 0.400, 0.0};
+            robots[second].pose = {0.605, 0.400, pi};
+            nominal[ids[first]] = {100, 100};
+            nominal[ids[second]] = {100, 100};
+
+            const ZooidCbfResult result = applyZooidCbf(
+                robots, nominal, 1000);
+            if (result.status != ZooidCbfStatus::Intervened ||
+                !zooidCbfConstraintsSatisfied(robots, result.commands)) {
+                std::cerr << "cbf-four-robot-pair-" << first << "-" << second
+                          << "-not-constrained failed\n";
+                ++failures;
+            }
+        }
+    }
+}
+
+static void testCbfHandlesPairAndCornerConstraintsTogether()
+{
+    const double pi = 3.14159265358979323846;
+    const std::vector<CbfRobotState> robots = {
+        cbfRobot(1, 0.051, 0.051, -3.0 * pi / 4.0),
+        cbfRobot(2, 0.156, 0.051, pi)
+    };
+    const std::map<unsigned int, WheelCommand> nominal = {
+        {1, {100, 100}},
+        {2, {100, 100}}
+    };
+    const ZooidCbfResult result = applyZooidCbf(robots, nominal, 1000);
+    if (result.status != ZooidCbfStatus::Intervened ||
+        !zooidCbfConstraintsSatisfied(robots, result.commands) ||
+        result.commands.at(1).left >= 100 ||
+        result.commands.at(2).left >= 100) {
+        std::cerr << "cbf-pair-plus-corner-constraints failed\n";
         ++failures;
     }
 }
@@ -1070,8 +1256,14 @@ int main()
     testCbfHandlesSimultaneousCornerConstraints();
     testCbfEnforcesWheelBoundsAndNonreverseCommonMode();
     testCbfIsInvariantToRobotInputOrder();
-    testCbfFailsClosedOnUnsafeBoundaryAndSolverLimit();
+    testCbfFailsClosedOnUnsafeBoundaryAndRepairsSolverLimit();
     testCbfToleranceCannotDisableSafetyChecks();
+    testCbfRejectsOneUlpOutsideEveryGeometryBoundary();
+    testCbfFindsNearestSafeDiscreteCommonModes();
+    testCbfSelectsGlobalDiscreteMinimumAfterSafeRounding();
+    testCbfDefaultIterationLimitUsesSafeDiscreteFallback();
+    testCbfConstrainsAllSixFourRobotPairs();
+    testCbfHandlesPairAndCornerConstraintsTogether();
     testConfirmedFieldAndCoordinateMapping();
     testTriangularRingUsesHandCheckedGeometry();
     testCaptureGeometryChecksRadiusAndAngularContainment();
