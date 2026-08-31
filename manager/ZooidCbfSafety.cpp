@@ -35,6 +35,18 @@ struct ExtendedValue
     double low;
 };
 
+struct StrictConstraintTerm
+{
+    std::size_t index;
+    ExtendedValue coefficient;
+};
+
+struct StrictHalfspace
+{
+    std::vector<StrictConstraintTerm> terms;
+    ExtendedValue lowerBound;
+};
+
 ExtendedValue normalizedExtended(double high, double low)
 {
     const double sum = high + low;
@@ -67,6 +79,29 @@ ExtendedValue exactProduct(double first, double second)
     return {high, std::fma(first, second, -high)};
 }
 
+ExtendedValue negateExtended(const ExtendedValue& value)
+{
+    return {-value.high, -value.low};
+}
+
+ExtendedValue subtractExtended(const ExtendedValue& first,
+                               const ExtendedValue& second)
+{
+    return addExtended(first, negateExtended(second));
+}
+
+ExtendedValue multiplyExtended(const ExtendedValue& first,
+                               const ExtendedValue& second)
+{
+    ExtendedValue result = exactProduct(first.high, second.high);
+    result = addExtended(
+        result, exactProduct(first.high, second.low));
+    result = addExtended(
+        result, exactProduct(first.low, second.high));
+    return addExtended(
+        result, exactProduct(first.low, second.low));
+}
+
 ExtendedValue squareExtended(const ExtendedValue& value)
 {
     ExtendedValue result = exactProduct(value.high, value.high);
@@ -80,6 +115,11 @@ bool extendedLess(const ExtendedValue& first,
 {
     return first.high < second.high ||
         (first.high == second.high && first.low < second.low);
+}
+
+bool finiteExtended(const ExtendedValue& value)
+{
+    return std::isfinite(value.high) && std::isfinite(value.low);
 }
 
 double effectiveTolerance(const ZooidCbfConfig& config)
@@ -281,6 +321,115 @@ bool buildConstraints(const std::vector<CbfRobotState>& robots,
     return true;
 }
 
+bool appendStrictHalfspace(
+    std::vector<StrictHalfspace>& constraints,
+    std::vector<StrictConstraintTerm> terms,
+    const ExtendedValue& lowerBound)
+{
+    if (!finiteExtended(lowerBound)) return false;
+    for (const StrictConstraintTerm& term : terms) {
+        if (!finiteExtended(term.coefficient)) return false;
+    }
+    constraints.push_back({std::move(terms), lowerBound});
+    return true;
+}
+
+bool buildStrictConstraints(const std::vector<CbfRobotState>& robots,
+                            const std::vector<double>& differentials,
+                            const ZooidCbfConfig& config,
+                            std::vector<StrictHalfspace>& constraints)
+{
+    constraints.clear();
+    const ExtendedValue zero = {0.0, 0.0};
+    const ExtendedValue one = {1.0, 0.0};
+    const ExtendedValue minusOne = {-1.0, 0.0};
+    const ExtendedValue wheelLimit = {
+        static_cast<double>(config.maximumWheelCommand), 0.0};
+    const ExtendedValue gammaUnits = multiplyExtended(
+        {config.gamma, 0.0},
+        {config.commandUnitsPerMetrePerSecond, 0.0});
+    const ExtendedValue maximumX =
+        exactDifference(config.fieldWidth, config.safeRadius);
+    const ExtendedValue maximumY =
+        exactDifference(config.fieldHeight, config.safeRadius);
+    for (std::size_t i = 0; i < robots.size(); ++i) {
+        const ExtendedValue differential = {differentials[i], 0.0};
+        const ExtendedValue cosine = {
+            std::cos(robots[i].pose.yaw), 0.0};
+        const ExtendedValue sine = {
+            std::sin(robots[i].pose.yaw), 0.0};
+        const ExtendedValue left = exactDifference(
+            robots[i].pose.x, config.safeRadius);
+        const ExtendedValue right = subtractExtended(
+            maximumX, {robots[i].pose.x, 0.0});
+        const ExtendedValue bottom = exactDifference(
+            robots[i].pose.y, config.safeRadius);
+        const ExtendedValue top = subtractExtended(
+            maximumY, {robots[i].pose.y, 0.0});
+
+        if (!appendStrictHalfspace(constraints, {{i, one}}, zero) ||
+            !appendStrictHalfspace(
+                constraints, {{i, one}},
+                subtractExtended(differential, wheelLimit)) ||
+            !appendStrictHalfspace(
+                constraints, {{i, minusOne}},
+                negateExtended(addExtended(wheelLimit, differential))) ||
+            !appendStrictHalfspace(
+                constraints, {{i, one}},
+                negateExtended(addExtended(wheelLimit, differential))) ||
+            !appendStrictHalfspace(
+                constraints, {{i, minusOne}},
+                subtractExtended(differential, wheelLimit)) ||
+            !appendStrictHalfspace(
+                constraints, {{i, cosine}},
+                negateExtended(multiplyExtended(gammaUnits, left))) ||
+            !appendStrictHalfspace(
+                constraints, {{i, negateExtended(cosine)}},
+                negateExtended(multiplyExtended(gammaUnits, right))) ||
+            !appendStrictHalfspace(
+                constraints, {{i, sine}},
+                negateExtended(multiplyExtended(gammaUnits, bottom))) ||
+            !appendStrictHalfspace(
+                constraints, {{i, negateExtended(sine)}},
+                negateExtended(multiplyExtended(gammaUnits, top)))) {
+            return false;
+        }
+    }
+
+    const ExtendedValue minimumDistanceSquared = squareExtended(
+        {config.minimumDistance, 0.0});
+    for (std::size_t i = 0; i < robots.size(); ++i) {
+        for (std::size_t j = i + 1; j < robots.size(); ++j) {
+            const ExtendedValue dx = exactDifference(
+                robots[i].pose.x, robots[j].pose.x);
+            const ExtendedValue dy = exactDifference(
+                robots[i].pose.y, robots[j].pose.y);
+            const ExtendedValue h = subtractExtended(
+                addExtended(squareExtended(dx), squareExtended(dy)),
+                minimumDistanceSquared);
+            const ExtendedValue firstDirection = addExtended(
+                multiplyExtended(
+                    dx, {std::cos(robots[i].pose.yaw), 0.0}),
+                multiplyExtended(
+                    dy, {std::sin(robots[i].pose.yaw), 0.0}));
+            const ExtendedValue secondDirection = addExtended(
+                multiplyExtended(
+                    dx, {std::cos(robots[j].pose.yaw), 0.0}),
+                multiplyExtended(
+                    dy, {std::sin(robots[j].pose.yaw), 0.0}));
+            if (!appendStrictHalfspace(
+                    constraints,
+                    {{i, multiplyExtended({2.0, 0.0}, firstDirection)},
+                     {j, negateExtended(multiplyExtended(
+                         {2.0, 0.0}, secondDirection))}},
+                    negateExtended(multiplyExtended(gammaUnits, h)))) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 double constraintValue(const Halfspace& constraint,
                        const std::vector<double>& values)
 {
@@ -290,17 +439,31 @@ double constraintValue(const Halfspace& constraint,
     return value;
 }
 
-bool constraintsSatisfied(const std::vector<double>& values,
-                          const std::vector<Halfspace>& constraints)
+bool projectionConstraintsSatisfied(
+    const std::vector<double>& values,
+    const std::vector<Halfspace>& constraints)
 {
     for (const Halfspace& constraint : constraints) {
-        ExtendedValue value = {0.0, 0.0};
-        for (const ConstraintTerm& term : constraint.terms) {
-            value = addExtended(
-                value, exactProduct(term.coefficient, values[term.index]));
+        const double value = constraintValue(constraint, values);
+        if (!std::isfinite(value) || value < constraint.lowerBound) {
+            return false;
         }
-        if (!std::isfinite(value.high) || !std::isfinite(value.low) ||
-            extendedLess(value, {constraint.lowerBound, 0.0})) {
+    }
+    return true;
+}
+
+bool strictConstraintsSatisfied(
+    const std::vector<double>& values,
+    const std::vector<StrictHalfspace>& constraints)
+{
+    for (const StrictHalfspace& constraint : constraints) {
+        ExtendedValue value = {0.0, 0.0};
+        for (const StrictConstraintTerm& term : constraint.terms) {
+            value = addExtended(value, multiplyExtended(
+                term.coefficient, {values[term.index], 0.0}));
+        }
+        if (!finiteExtended(value) ||
+            extendedLess(value, constraint.lowerBound)) {
             return false;
         }
     }
@@ -346,7 +509,7 @@ bool projectDykstra(const std::vector<double>& initial,
                 maximumChange, std::abs(projected[i] - cycleStart[i]));
         }
         if (maximumChange <= tolerance &&
-            constraintsSatisfied(projected, constraints)) {
+            projectionConstraintsSatisfied(projected, constraints)) {
             return true;
         }
     }
@@ -443,12 +606,14 @@ bool findDiscreteCommands(
     const std::map<unsigned int, WheelCommand>& nominal,
     const std::vector<double>& nominalCommonModes,
     const std::vector<double>& projected,
-    const std::vector<Halfspace>& constraints,
+    const std::vector<StrictHalfspace>& constraints,
     const ZooidCbfConfig& config,
     std::map<unsigned int, WheelCommand>& commands)
 {
     std::vector<std::vector<double>> candidates(robots.size());
     std::vector<double> targets(robots.size());
+    std::vector<double> minimumCommonFallback;
+    minimumCommonFallback.reserve(robots.size());
     for (std::size_t i = 0; i < robots.size(); ++i) {
         const double nominalCommon = nominalCommonModes[i];
         const WheelCommand original = nominal.at(robots[i].id);
@@ -461,6 +626,7 @@ bool findDiscreteCommands(
             wheelLimit - static_cast<long>(original.left),
             wheelLimit - static_cast<long>(original.right));
         if (minimumShift > maximumShift) return false;
+        minimumCommonFallback.push_back(nominalCommon + minimumShift);
         for (long shift = minimumShift; shift <= maximumShift; ++shift) {
             candidates[i].push_back(nominalCommon + shift);
         }
@@ -479,6 +645,8 @@ bool findDiscreteCommands(
                           : first < second;
                   });
     }
+    const bool fallbackSafe = strictConstraintsSatisfied(
+        minimumCommonFallback, constraints);
 
     DiscreteNode initial;
     initial.ranks.assign(robots.size(), 0);
@@ -486,7 +654,11 @@ bool findDiscreteCommands(
         initial.commonModes.push_back(robotCandidates.front());
     initial.projectedDistanceSquared =
         projectedDistanceSquared(initial.commonModes, targets);
-    if (!std::isfinite(initial.projectedDistanceSquared)) return false;
+    if (!std::isfinite(initial.projectedDistanceSquared)) {
+        return fallbackSafe && reconstructCommands(
+            robots, nominal, nominalCommonModes,
+            minimumCommonFallback, commands);
+    }
 
     std::priority_queue<DiscreteNode,
                         std::vector<DiscreteNode>,
@@ -496,7 +668,7 @@ bool findDiscreteCommands(
     while (!frontier.empty()) {
         DiscreteNode node = frontier.top();
         frontier.pop();
-        if (constraintsSatisfied(node.commonModes, constraints)) {
+        if (strictConstraintsSatisfied(node.commonModes, constraints)) {
             return reconstructCommands(
                 robots, nominal, nominalCommonModes,
                 node.commonModes, commands);
@@ -519,7 +691,9 @@ bool findDiscreteCommands(
             }
         }
     }
-    return false;
+    return fallbackSafe && reconstructCommands(
+        robots, nominal, nominalCommonModes,
+        minimumCommonFallback, commands);
 }
 
 bool sameCommands(const std::map<unsigned int, WheelCommand>& first,
@@ -553,9 +727,10 @@ bool zooidCbfConstraintsSatisfied(
     std::vector<double> commonModes;
     std::vector<double> differentials;
     commandModes(sorted, commands, commonModes, differentials);
-    std::vector<Halfspace> constraints;
-    return buildConstraints(sorted, differentials, config, constraints) &&
-        constraintsSatisfied(commonModes, constraints);
+    std::vector<StrictHalfspace> constraints;
+    return buildStrictConstraints(
+            sorted, differentials, config, constraints) &&
+        strictConstraintsSatisfied(commonModes, constraints);
 }
 
 ZooidCbfResult applyZooidCbf(
@@ -579,10 +754,15 @@ ZooidCbfResult applyZooidCbf(
     std::vector<double> differentials;
     commandModes(sorted, nominal, nominalCommonModes, differentials);
     std::vector<Halfspace> constraints;
-    if (!buildConstraints(sorted, differentials, config, constraints))
+    std::vector<StrictHalfspace> strictConstraints;
+    if (!buildConstraints(sorted, differentials, config, constraints) ||
+        !buildStrictConstraints(
+            sorted, differentials, config, strictConstraints)) {
         return zeroResult(robots, ZooidCbfStatus::SolverFailure);
+    }
 
-    if (constraintsSatisfied(nominalCommonModes, constraints)) {
+    if (strictConstraintsSatisfied(
+            nominalCommonModes, strictConstraints)) {
         ZooidCbfResult result;
         result.status = ZooidCbfStatus::Safe;
         result.commands = nominal;
@@ -594,7 +774,7 @@ ZooidCbfResult applyZooidCbf(
     projectDykstra(nominalCommonModes, constraints, config, projected);
     if (!findDiscreteCommands(
             sorted, nominal, nominalCommonModes, projected,
-            constraints, config, commands)) {
+            strictConstraints, config, commands)) {
         return zeroResult(robots, ZooidCbfStatus::SolverFailure);
     }
 
