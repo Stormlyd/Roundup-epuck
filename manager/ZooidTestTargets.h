@@ -7,6 +7,7 @@ class ZooidTestTargets
 {
 public:
     void startSnapshot(const std::vector<unsigned int>& ids);
+    void recordCommanded(const std::vector<unsigned int>& ids);
     void retainActive(const std::vector<unsigned int>& currentlyActiveIds);
     const std::vector<unsigned int>& activeIds() const;
     const std::vector<unsigned int>& lostIds() const;

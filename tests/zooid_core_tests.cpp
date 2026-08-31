@@ -251,6 +251,19 @@ static void testTargetSnapshot()
     if (!targets.empty() || !targets.lostIds().empty()) ++failures;
 }
 
+static void testTargetSnapshotRecordsEveryCommandedRobotForSafeStop()
+{
+    ZooidTestTargets targets;
+    targets.startSnapshot({1, 5, 12});
+    targets.recordCommanded({5, 20, 20, 9});
+    expectIds("commanded-extra-robots-recorded-for-stop",
+              targets.activeIds(), {1, 5, 9, 12, 20});
+
+    targets.retainActive({1, 5, 9});
+    expectIds("commanded-lost-robots-retained-for-stop",
+              targets.lostIds(), {12, 20});
+}
+
 static void testRandomHardwareIdsAssignFourLogicalRoles()
 {
     PursuitRoleMap roles;
@@ -1748,6 +1761,7 @@ int main()
     testZooidFrameParserResynchronizesWithoutScanningPayloadMarkers();
     testSpeedCodec();
     testTargetSnapshot();
+    testTargetSnapshotRecordsEveryCommandedRobotForSafeStop();
     testRandomHardwareIdsAssignFourLogicalRoles();
     testRoleAssignmentRejectsTooFewWithoutMutation();
     testCbfLeavesSafeNominalUnchanged();

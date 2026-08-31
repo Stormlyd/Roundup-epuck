@@ -19,6 +19,12 @@ void ZooidTestTargets::startSnapshot(const std::vector<unsigned int>& ids)
     lostIds_.clear();
 }
 
+void ZooidTestTargets::recordCommanded(const std::vector<unsigned int>& ids)
+{
+    activeIds_.insert(activeIds_.end(), ids.begin(), ids.end());
+    activeIds_ = normalized(activeIds_);
+}
+
 void ZooidTestTargets::retainActive(const std::vector<unsigned int>& currentlyActiveIds)
 {
     const std::vector<unsigned int> current = normalized(currentlyActiveIds);

@@ -695,9 +695,13 @@ void ZooidManager::serviceTestMode(uint64_t nowMs)
     if (output.phase == PursuitPhase::Captured && output.fault == PursuitFault::None)
         stopReason = TestModeStatus::Completed;
 
-    sendTestCommands(output.commands);
     std::vector<unsigned int> commandIds;
     for (const auto& entry : output.commands) commandIds.push_back(entry.first);
+    {
+        unique_lock<mutex> lock(testModeMutex);
+        testTargets.recordCommanded(commandIds);
+    }
+    sendTestCommands(output.commands);
     flushReceiversForIds(commandIds);
 
     if (stopReason != TestModeStatus::Idle)
