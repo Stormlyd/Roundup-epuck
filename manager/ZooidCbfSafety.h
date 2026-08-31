@@ -26,6 +26,7 @@ struct ZooidCbfConfig
     uint64_t maximumSnapshotSkewMs = 50;
     int maximumWheelCommand = 1000;
     unsigned int maximumIterations = 256;
+    uint64_t maximumDiscreteSearchNodes = 4096;
     double tolerance = 1e-9;
 };
 

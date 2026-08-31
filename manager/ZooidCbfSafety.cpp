@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <queue>
 #include <utility>
 
 namespace
@@ -27,6 +28,59 @@ struct Halfspace
     double lowerBound = 0.0;
     double normSquared = 0.0;
 };
+
+struct ExtendedValue
+{
+    double high;
+    double low;
+};
+
+ExtendedValue normalizedExtended(double high, double low)
+{
+    const double sum = high + low;
+    return {sum, low - (sum - high)};
+}
+
+ExtendedValue addExtended(const ExtendedValue& first,
+                          const ExtendedValue& second)
+{
+    const double high = first.high + second.high;
+    const double secondVirtual = high - first.high;
+    const double error =
+        (first.high - (high - secondVirtual)) +
+        (second.high - secondVirtual);
+    return normalizedExtended(high, error + first.low + second.low);
+}
+
+ExtendedValue exactDifference(double first, double second)
+{
+    const double high = first - second;
+    const double secondVirtual = first - high;
+    const double firstVirtual = high + secondVirtual;
+    return {high,
+            (first - firstVirtual) + (secondVirtual - second)};
+}
+
+ExtendedValue exactProduct(double first, double second)
+{
+    const double high = first * second;
+    return {high, std::fma(first, second, -high)};
+}
+
+ExtendedValue squareExtended(const ExtendedValue& value)
+{
+    ExtendedValue result = exactProduct(value.high, value.high);
+    result = addExtended(
+        result, exactProduct(2.0 * value.high, value.low));
+    return addExtended(result, exactProduct(value.low, value.low));
+}
+
+bool extendedLess(const ExtendedValue& first,
+                  const ExtendedValue& second)
+{
+    return first.high < second.high ||
+        (first.high == second.high && first.low < second.low);
+}
 
 double effectiveTolerance(const ZooidCbfConfig& config)
 {
@@ -62,7 +116,8 @@ bool validConfig(const ZooidCbfConfig& config)
         config.freshnessLimitMs > 0 &&
         config.maximumWheelCommand >= 0 &&
         config.maximumWheelCommand <= std::numeric_limits<int16_t>::max() &&
-        config.maximumIterations > 0 && config.tolerance >= 0.0;
+        config.maximumIterations > 0 &&
+        config.maximumDiscreteSearchNodes > 0 && config.tolerance >= 0.0;
 }
 
 InputValidity validateStructure(
@@ -113,25 +168,39 @@ bool validTiming(const std::vector<CbfRobotState>& robots,
 InputValidity validateGeometry(const std::vector<CbfRobotState>& robots,
                                const ZooidCbfConfig& config)
 {
+    const ExtendedValue safeRadius = {config.safeRadius, 0.0};
+    const ExtendedValue maximumX =
+        exactDifference(config.fieldWidth, config.safeRadius);
+    const ExtendedValue maximumY =
+        exactDifference(config.fieldHeight, config.safeRadius);
     for (const CbfRobotState& robot : robots) {
-        if (robot.pose.x < config.safeRadius ||
-            robot.pose.x > config.fieldWidth - config.safeRadius ||
-            robot.pose.y < config.safeRadius ||
-            robot.pose.y > config.fieldHeight - config.safeRadius) {
+        const ExtendedValue x = {robot.pose.x, 0.0};
+        const ExtendedValue y = {robot.pose.y, 0.0};
+        if (extendedLess(x, safeRadius) || extendedLess(maximumX, x) ||
+            extendedLess(y, safeRadius) || extendedLess(maximumY, y)) {
             return InputValidity::Unsafe;
         }
     }
 
-    const double minimumDistanceSquared =
-        config.minimumDistance * config.minimumDistance;
-    if (!std::isfinite(minimumDistanceSquared)) return InputValidity::Invalid;
+    const ExtendedValue minimumDistanceSquared = squareExtended(
+        {config.minimumDistance, 0.0});
+    if (!std::isfinite(minimumDistanceSquared.high) ||
+        !std::isfinite(minimumDistanceSquared.low)) {
+        return InputValidity::Invalid;
+    }
     for (std::size_t i = 0; i < robots.size(); ++i) {
         for (std::size_t j = i + 1; j < robots.size(); ++j) {
-            const double dx = robots[i].pose.x - robots[j].pose.x;
-            const double dy = robots[i].pose.y - robots[j].pose.y;
-            const double distanceSquared = dx * dx + dy * dy;
-            if (!std::isfinite(distanceSquared)) return InputValidity::Invalid;
-            if (distanceSquared < minimumDistanceSquared)
+            const ExtendedValue dx = exactDifference(
+                robots[i].pose.x, robots[j].pose.x);
+            const ExtendedValue dy = exactDifference(
+                robots[i].pose.y, robots[j].pose.y);
+            const ExtendedValue distanceSquared = addExtended(
+                squareExtended(dx), squareExtended(dy));
+            if (!std::isfinite(distanceSquared.high) ||
+                !std::isfinite(distanceSquared.low)) {
+                return InputValidity::Invalid;
+            }
+            if (extendedLess(distanceSquared, minimumDistanceSquared))
                 return InputValidity::Unsafe;
         }
     }
@@ -222,13 +291,16 @@ double constraintValue(const Halfspace& constraint,
 }
 
 bool constraintsSatisfied(const std::vector<double>& values,
-                          const std::vector<Halfspace>& constraints,
-                          double tolerance)
+                          const std::vector<Halfspace>& constraints)
 {
     for (const Halfspace& constraint : constraints) {
-        const double value = constraintValue(constraint, values);
-        if (!std::isfinite(value) ||
-            constraint.lowerBound - value > tolerance) {
+        ExtendedValue value = {0.0, 0.0};
+        for (const ConstraintTerm& term : constraint.terms) {
+            value = addExtended(
+                value, exactProduct(term.coefficient, values[term.index]));
+        }
+        if (!std::isfinite(value.high) || !std::isfinite(value.low) ||
+            extendedLess(value, {constraint.lowerBound, 0.0})) {
             return false;
         }
     }
@@ -274,7 +346,7 @@ bool projectDykstra(const std::vector<double>& initial,
                 maximumChange, std::abs(projected[i] - cycleStart[i]));
         }
         if (maximumChange <= tolerance &&
-            constraintsSatisfied(projected, constraints, tolerance)) {
+            constraintsSatisfied(projected, constraints)) {
             return true;
         }
     }
@@ -331,50 +403,39 @@ bool reconstructCommands(
     return true;
 }
 
-void searchDiscreteCombinations(
-    const std::vector<CbfRobotState>& robots,
-    const std::map<unsigned int, WheelCommand>& nominal,
-    const std::vector<double>& nominalCommonModes,
-    const std::vector<std::vector<double>>& candidates,
-    const ZooidCbfConfig& config,
-    std::size_t index,
-    double cost,
-    std::vector<double>& current,
-    bool& found,
-    double& bestCost,
-    std::vector<double>& bestCommonModes,
-    std::map<unsigned int, WheelCommand>& bestCommands)
+struct DiscreteNode
 {
-    if (found && cost > bestCost) return;
-    if (index == robots.size()) {
-        std::map<unsigned int, WheelCommand> commands;
-        if (!reconstructCommands(
-                robots, nominal, nominalCommonModes, current, commands) ||
-            !zooidCbfConstraintsSatisfied(robots, commands, config)) {
-            return;
-        }
-        if (!found || cost < bestCost ||
-            (cost == bestCost && std::lexicographical_compare(
-                current.begin(), current.end(),
-                bestCommonModes.begin(), bestCommonModes.end()))) {
-            found = true;
-            bestCost = cost;
-            bestCommonModes = current;
-            bestCommands = std::move(commands);
-        }
-        return;
-    }
+    std::vector<std::size_t> ranks;
+    std::vector<double> commonModes;
+    double projectedDistanceSquared = 0.0;
+    std::size_t minimumIncrementIndex = 0;
+};
 
-    for (double candidate : candidates[index]) {
-        const double difference = candidate - nominalCommonModes[index];
-        const double nextCost = cost + difference * difference;
-        if (!std::isfinite(nextCost)) continue;
-        current[index] = candidate;
-        searchDiscreteCombinations(
-            robots, nominal, nominalCommonModes, candidates, config,
-            index + 1, nextCost, current, found, bestCost,
-            bestCommonModes, bestCommands);
+struct DiscreteNodeIsWorse
+{
+    bool operator()(const DiscreteNode& first,
+                    const DiscreteNode& second) const
+    {
+        if (first.projectedDistanceSquared !=
+            second.projectedDistanceSquared) {
+            return first.projectedDistanceSquared >
+                second.projectedDistanceSquared;
+        }
+        return std::lexicographical_compare(
+            second.commonModes.begin(), second.commonModes.end(),
+            first.commonModes.begin(), first.commonModes.end());
     }
+};
+
+double projectedDistanceSquared(const std::vector<double>& commonModes,
+                                const std::vector<double>& projected)
+{
+    double distanceSquared = 0.0;
+    for (std::size_t i = 0; i < commonModes.size(); ++i) {
+        const double difference = commonModes[i] - projected[i];
+        distanceSquared += difference * difference;
+    }
+    return distanceSquared;
 }
 
 bool findDiscreteCommands(
@@ -382,34 +443,35 @@ bool findDiscreteCommands(
     const std::map<unsigned int, WheelCommand>& nominal,
     const std::vector<double>& nominalCommonModes,
     const std::vector<double>& projected,
+    const std::vector<Halfspace>& constraints,
     const ZooidCbfConfig& config,
     std::map<unsigned int, WheelCommand>& commands)
 {
     std::vector<std::vector<double>> candidates(robots.size());
+    std::vector<double> targets(robots.size());
     for (std::size_t i = 0; i < robots.size(); ++i) {
         const double nominalCommon = nominalCommonModes[i];
-        const auto addShift = [&](double shift) {
-            const double candidate = nominalCommon + shift;
-            if (std::isfinite(candidate) &&
-                std::find(candidates[i].begin(), candidates[i].end(), candidate) ==
-                    candidates[i].end()) {
-                candidates[i].push_back(candidate);
-            }
-        };
-        if (i < projected.size() && std::isfinite(projected[i])) {
-            const double projectedShift = projected[i] - nominalCommon;
-            addShift(std::floor(projectedShift));
-            addShift(std::ceil(projectedShift));
+        const WheelCommand original = nominal.at(robots[i].id);
+        const long wheelLimit = config.maximumWheelCommand;
+        const long minimumShift = std::max({
+            -wheelLimit - static_cast<long>(original.left),
+            -wheelLimit - static_cast<long>(original.right),
+            static_cast<long>(std::ceil(-nominalCommon))});
+        const long maximumShift = std::min(
+            wheelLimit - static_cast<long>(original.left),
+            wheelLimit - static_cast<long>(original.right));
+        if (minimumShift > maximumShift) return false;
+        for (long shift = minimumShift; shift <= maximumShift; ++shift) {
+            candidates[i].push_back(nominalCommon + shift);
         }
-        addShift(-1.0);
-        addShift(0.0);
-        addShift(1.0);
-        addShift(std::floor(-nominalCommon));
-        addShift(std::ceil(-nominalCommon));
+
+        targets[i] = i < projected.size() && std::isfinite(projected[i])
+            ? projected[i]
+            : nominalCommon;
         std::sort(candidates[i].begin(), candidates[i].end(),
-                  [nominalCommon](double first, double second) {
-                      const double firstDifference = first - nominalCommon;
-                      const double secondDifference = second - nominalCommon;
+                  [target = targets[i]](double first, double second) {
+                      const double firstDifference = first - target;
+                      const double secondDifference = second - target;
                       const double firstCost = firstDifference * firstDifference;
                       const double secondCost = secondDifference * secondDifference;
                       return firstCost != secondCost
@@ -418,14 +480,46 @@ bool findDiscreteCommands(
                   });
     }
 
-    bool found = false;
-    double bestCost = std::numeric_limits<double>::infinity();
-    std::vector<double> current(robots.size(), 0.0);
-    std::vector<double> bestCommonModes;
-    searchDiscreteCombinations(
-        robots, nominal, nominalCommonModes, candidates, config,
-        0, 0.0, current, found, bestCost, bestCommonModes, commands);
-    return found;
+    DiscreteNode initial;
+    initial.ranks.assign(robots.size(), 0);
+    for (const std::vector<double>& robotCandidates : candidates)
+        initial.commonModes.push_back(robotCandidates.front());
+    initial.projectedDistanceSquared =
+        projectedDistanceSquared(initial.commonModes, targets);
+    if (!std::isfinite(initial.projectedDistanceSquared)) return false;
+
+    std::priority_queue<DiscreteNode,
+                        std::vector<DiscreteNode>,
+                        DiscreteNodeIsWorse> frontier;
+    frontier.push(std::move(initial));
+    uint64_t createdNodes = 1;
+    while (!frontier.empty()) {
+        DiscreteNode node = frontier.top();
+        frontier.pop();
+        if (constraintsSatisfied(node.commonModes, constraints)) {
+            return reconstructCommands(
+                robots, nominal, nominalCommonModes,
+                node.commonModes, commands);
+        }
+        if (createdNodes >= config.maximumDiscreteSearchNodes) continue;
+
+        for (std::size_t i = node.minimumIncrementIndex;
+             i < robots.size(); ++i) {
+            if (createdNodes >= config.maximumDiscreteSearchNodes) break;
+            if (node.ranks[i] + 1 >= candidates[i].size()) continue;
+            DiscreteNode next = node;
+            ++next.ranks[i];
+            next.commonModes[i] = candidates[i][next.ranks[i]];
+            next.projectedDistanceSquared =
+                projectedDistanceSquared(next.commonModes, targets);
+            next.minimumIncrementIndex = i;
+            if (std::isfinite(next.projectedDistanceSquared)) {
+                frontier.push(std::move(next));
+                ++createdNodes;
+            }
+        }
+    }
+    return false;
 }
 
 bool sameCommands(const std::map<unsigned int, WheelCommand>& first,
@@ -461,8 +555,7 @@ bool zooidCbfConstraintsSatisfied(
     commandModes(sorted, commands, commonModes, differentials);
     std::vector<Halfspace> constraints;
     return buildConstraints(sorted, differentials, config, constraints) &&
-        constraintsSatisfied(
-            commonModes, constraints, effectiveTolerance(config));
+        constraintsSatisfied(commonModes, constraints);
 }
 
 ZooidCbfResult applyZooidCbf(
@@ -489,8 +582,7 @@ ZooidCbfResult applyZooidCbf(
     if (!buildConstraints(sorted, differentials, config, constraints))
         return zeroResult(robots, ZooidCbfStatus::SolverFailure);
 
-    if (constraintsSatisfied(
-            nominalCommonModes, constraints, effectiveTolerance(config))) {
+    if (constraintsSatisfied(nominalCommonModes, constraints)) {
         ZooidCbfResult result;
         result.status = ZooidCbfStatus::Safe;
         result.commands = nominal;
@@ -501,7 +593,8 @@ ZooidCbfResult applyZooidCbf(
     std::map<unsigned int, WheelCommand> commands;
     projectDykstra(nominalCommonModes, constraints, config, projected);
     if (!findDiscreteCommands(
-            sorted, nominal, nominalCommonModes, projected, config, commands)) {
+            sorted, nominal, nominalCommonModes, projected,
+            constraints, config, commands)) {
         return zeroResult(robots, ZooidCbfStatus::SolverFailure);
     }
 
