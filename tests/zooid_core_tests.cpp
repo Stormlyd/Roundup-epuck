@@ -1,6 +1,7 @@
 #include "../manager/ZooidTestMode.h"
 #include "../manager/ZooidCbfSafety.h"
 #include "../manager/ZooidCoordinates.h"
+#include "../manager/ZooidMessage.h"
 #include "../manager/ZooidSpeedCodec.h"
 #include "../manager/ZooidTestTargets.h"
 #include "../manager/ZooidPursuitRoles.h"
@@ -16,6 +17,193 @@
 #include <vector>
 
 static int failures = 0;
+
+static ZooidMessage ownedStatusMessage()
+{
+    uint8_t bytes[8] = {
+        0x34, 0x12, 0xcd, 0xab, 0x2e, 0xfb, 0x07, 0x63
+    };
+    ZooidMessage message(9, 4, bytes, sizeof(bytes), 123456, 42);
+    std::fill(bytes, bytes + sizeof(bytes), 0);
+    return message;
+}
+
+static void testZooidMessageOwnsAndDecodesExactStatusPayload()
+{
+    const ZooidMessage message = ownedStatusMessage();
+    const ZooidMessage copy = message;
+    DecodedStatusMessage decoded;
+    if (message.getSenderId() != 9 || message.getType() != 4 ||
+        message.getLength() != 8 || message.getReceivedAtMs() != 123456 ||
+        message.getSequence() != 42 || copy.getLength() != 8 ||
+        copy.getReceivedAtMs() != 123456 || copy.getSequence() != 42 ||
+        copy.getPayload() == nullptr || copy.getPayload()[0] != 0x34 ||
+        !decodeStatusMessage(copy, decoded) || decoded.positionX != 0x1234 ||
+        decoded.positionY != 0xabcd || decoded.orientation != -1234 ||
+        decoded.state != 7 || decoded.batteryLevel != 99) {
+        std::cerr << "owned-little-endian-status-message failed\n";
+        ++failures;
+    }
+
+    uint8_t shortBytes[7] = {};
+    uint8_t longBytes[9] = {};
+    if (decodeStatusMessage(
+            ZooidMessage(1, 4, shortBytes, sizeof(shortBytes), 1, 1), decoded) ||
+        decodeStatusMessage(
+            ZooidMessage(1, 4, longBytes, sizeof(longBytes), 1, 1), decoded)) {
+        std::cerr << "status-message-non-eight-length-accepted failed\n";
+        ++failures;
+    }
+}
+
+static void testZooidMessagePreservesExactHandshakePayload()
+{
+    uint8_t reply[9] = {
+        'Y', 'o', 'u', ' ', 'a', 'r', 'e', '?', '\0'
+    };
+    const ZooidMessage message(1, 0x13, reply, sizeof(reply), 7, 8);
+    const uint8_t expected[9] = {
+        'Y', 'o', 'u', ' ', 'a', 'r', 'e', '?', '\0'
+    };
+    if (message.getLength() != sizeof(expected) ||
+        message.getPayload() == nullptr ||
+        !std::equal(expected, expected + sizeof(expected),
+                    message.getPayload())) {
+        std::cerr << "exact-nine-byte-handshake-payload failed\n";
+        ++failures;
+    }
+}
+
+static ZooidMessage queueMessage(uint8_t senderId)
+{
+    return ZooidMessage(senderId, 1, nullptr, 0, senderId, senderId);
+}
+
+static void testZooidMessageQueueIsBoundedFifo()
+{
+    ZooidMessageQueue queue(3);
+    queue.push(queueMessage('A'));
+    queue.push(queueMessage('B'));
+    queue.push(queueMessage('C'));
+    if (queue.size() != 3 || queue.pop().getSenderId() != 'A' ||
+        queue.pop().getSenderId() != 'B' ||
+        queue.pop().getSenderId() != 'C' || !queue.empty()) {
+        std::cerr << "message-queue-not-fifo failed\n";
+        ++failures;
+    }
+
+    queue.push(queueMessage('A'));
+    queue.push(queueMessage('B'));
+    queue.push(queueMessage('C'));
+    queue.push(queueMessage('D'));
+    if (queue.size() != 3 || queue.pop().getSenderId() != 'B' ||
+        queue.pop().getSenderId() != 'C' ||
+        queue.pop().getSenderId() != 'D' || !queue.empty()) {
+        std::cerr << "message-queue-overflow-not-oldest-first failed\n";
+        ++failures;
+    }
+}
+
+static std::vector<uint8_t> zooidFrame(
+    uint8_t type,
+    uint8_t senderId,
+    const std::vector<uint8_t>& payload)
+{
+    std::vector<uint8_t> frame = {
+        static_cast<uint8_t>('~'), type, senderId,
+        static_cast<uint8_t>(payload.size())
+    };
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    frame.push_back(static_cast<uint8_t>('!'));
+    return frame;
+}
+
+static bool extractExpectedFrame(
+    std::vector<uint8_t>& buffer,
+    uint8_t expectedType,
+    uint8_t expectedSender,
+    const std::vector<uint8_t>& expectedPayload)
+{
+    uint8_t sender = 0;
+    uint8_t type = 0;
+    std::vector<uint8_t> payload;
+    return extractZooidFrame(buffer, sender, type, payload) &&
+        sender == expectedSender && type == expectedType &&
+        payload == expectedPayload;
+}
+
+static void testZooidFrameParserHandlesFragmentsAndConsecutiveFrames()
+{
+    const std::vector<uint8_t> frame = zooidFrame(0x10, 7, {});
+    std::vector<uint8_t> buffer(frame.begin(), frame.begin() + 1);
+    uint8_t sender = 0;
+    uint8_t type = 0;
+    std::vector<uint8_t> payload;
+    if (extractZooidFrame(buffer, sender, type, payload)) {
+        std::cerr << "one-byte-frame-fragment-extracted failed\n";
+        ++failures;
+    }
+    buffer.insert(buffer.end(), frame.begin() + 1, frame.begin() + 3);
+    if (extractZooidFrame(buffer, sender, type, payload)) {
+        std::cerr << "one-two-frame-fragments-extracted failed\n";
+        ++failures;
+    }
+    buffer.insert(buffer.end(), frame.begin() + 3, frame.end());
+    if (!extractExpectedFrame(buffer, 0x10, 7, {}) || !buffer.empty()) {
+        std::cerr << "one-two-two-frame-fragments-not-reassembled failed\n";
+        ++failures;
+    }
+
+    const std::vector<uint8_t> first = zooidFrame(1, 2, {3, 4});
+    const std::vector<uint8_t> second = zooidFrame(5, 6, {7});
+    buffer.insert(buffer.end(), first.begin(), first.end());
+    buffer.insert(buffer.end(), second.begin(), second.end());
+    if (!extractExpectedFrame(buffer, 1, 2, {3, 4}) ||
+        !extractExpectedFrame(buffer, 5, 6, {7}) || !buffer.empty()) {
+        std::cerr << "consecutive-frames-not-extracted-in-order failed\n";
+        ++failures;
+    }
+}
+
+static void testZooidFrameParserResynchronizesWithoutScanningPayloadMarkers()
+{
+    const std::vector<uint8_t> markerPayload = {
+        static_cast<uint8_t>('~'), static_cast<uint8_t>('!'), 0x55
+    };
+    const std::vector<uint8_t> valid = zooidFrame(9, 8, markerPayload);
+
+    std::vector<uint8_t> buffer = {0x00, 0x21, 0x7f};
+    buffer.insert(buffer.end(), valid.begin(), valid.end());
+    if (!extractExpectedFrame(buffer, 9, 8, markerPayload)) {
+        std::cerr << "noise-prefix-not-resynchronized failed\n";
+        ++failures;
+    }
+
+    buffer = {
+        static_cast<uint8_t>('~'), 1, 2, 33, 0x00, 0x01
+    };
+    buffer.insert(buffer.end(), valid.begin(), valid.end());
+    if (!extractExpectedFrame(buffer, 9, 8, markerPayload)) {
+        std::cerr << "oversized-frame-not-rejected-and-resynchronized failed\n";
+        ++failures;
+    }
+
+    buffer = zooidFrame(1, 2, {3});
+    buffer.back() = static_cast<uint8_t>('?');
+    buffer.insert(buffer.end(), valid.begin(), valid.end());
+    if (!extractExpectedFrame(buffer, 9, 8, markerPayload)) {
+        std::cerr << "bad-tail-not-rejected-and-resynchronized failed\n";
+        ++failures;
+    }
+
+    const std::vector<uint8_t> maximumPayload(32, 0xa5);
+    buffer = zooidFrame(3, 4, maximumPayload);
+    if (!extractExpectedFrame(buffer, 3, 4, maximumPayload) ||
+        !buffer.empty()) {
+        std::cerr << "maximum-32-byte-frame-not-accepted failed\n";
+        ++failures;
+    }
+}
 
 static void testSpeedCodec()
 {
@@ -1553,6 +1741,11 @@ static void testMissionStopIsIdempotentAndRestartRebuildsRoles()
 
 int main()
 {
+    testZooidMessageOwnsAndDecodesExactStatusPayload();
+    testZooidMessagePreservesExactHandshakePayload();
+    testZooidMessageQueueIsBoundedFifo();
+    testZooidFrameParserHandlesFragmentsAndConsecutiveFrames();
+    testZooidFrameParserResynchronizesWithoutScanningPayloadMarkers();
     testSpeedCodec();
     testTargetSnapshot();
     testRandomHardwareIdsAssignFourLogicalRoles();

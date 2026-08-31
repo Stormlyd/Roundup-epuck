@@ -1,93 +1,71 @@
-﻿#ifndef ZOOIDMESSAGE_H
+#ifndef ZOOIDMESSAGE_H
 #define ZOOIDMESSAGE_H
 
-#pragma once
+#include <cstddef>
+#include <cstdint>
+#include <deque>
+#include <vector>
 
-#include <iostream>
-#include <string>
-#include <cstdio>
-#include <iomanip>
-#include <sstream>
-
-using namespace std;
+constexpr std::size_t ZooidMaximumPayloadSize = 32;
 
 class ZooidMessage
 {
-
 public:
-    /**
-     * @brief ZooidMessage
-     */
-    ZooidMessage();
+    ZooidMessage() = default;
+    ZooidMessage(uint8_t senderId,
+                 uint8_t type,
+                 const uint8_t* payload,
+                 std::size_t length,
+                 uint64_t receivedAtMs,
+                 uint64_t sequence);
 
-    /**
-     * @brief ZooidMessage
-     * @param _senderId
-     * @param _type
-     * @param _payload
-     */
-    ZooidMessage(uint8_t _senderId, uint8_t _type, uint8_t* _payload);
+    uint8_t getType() const;
+    uint8_t getSenderId() const;
 
-    ~ZooidMessage();
-
-    /**
-     * @brief 设置一个信息包的类型位
-     * @param _type 要设置的类型
-     */
-    void setType(uint8_t _type);
-
-    /**
-     * @brief 获取一个信息包类型位
-     * @return  返回当前类型
-     */
-    uint8_t getType();
-
-    /**
-     * @brief 设置一个信息包源地址ID
-     * @param _senderId 发送者的Id
-     */
-    void setSenderId(uint8_t _senderId);
-
-    /**
-     * @brief 获取一个信息包源地址ID
-     * @return 返回ID
-     */
-    uint8_t getSenderId();
-
-    /**
-     * @brief 设置一个信息包中的数据内容
-     * @param _payload  有效数据
-     */
-    void setPayload(uint8_t* _payload);
-
-    /**
-     * @brief 获取一个信息包中的数据内容
-     * @return  返回数据内容
-     */
-    uint8_t* getPayload();
-
-    /**
-     * @brief 制作一个信息包
-     * @return  返回信息报字节数组
-     */
-    uint8_t* ToByteArray();
-
-    /**
-     * @brief 转到字符串
-     * @return
-     */
-    string IntoString();
-
-    /**
-     * @brief 转到16进制
-     * @return
-     */
-    string ToHexString();
+    const uint8_t* getPayload() const;
+    std::size_t getLength() const;
+    uint64_t getReceivedAtMs() const;
+    uint64_t getSequence() const;
 
 private:
-    uint8_t type;           //类型
-    uint8_t senderId;       //发送者Id
-    uint8_t* payload;       //有效数据
+    uint8_t type_ = 0;
+    uint8_t senderId_ = 0;
+    std::vector<uint8_t> payload_;
+    uint64_t receivedAtMs_ = 0;
+    uint64_t sequence_ = 0;
 };
+
+struct DecodedStatusMessage
+{
+    uint16_t positionX = 0;
+    uint16_t positionY = 0;
+    int16_t orientation = 0;
+    uint8_t state = 0;
+    uint8_t batteryLevel = 0;
+};
+
+bool decodeStatusMessage(const ZooidMessage& message,
+                         DecodedStatusMessage& status);
+
+class ZooidMessageQueue
+{
+public:
+    explicit ZooidMessageQueue(std::size_t capacity);
+
+    void push(const ZooidMessage& message);
+    ZooidMessage pop();
+    std::size_t size() const;
+    bool empty() const;
+    void clear();
+
+private:
+    std::size_t capacity_;
+    std::deque<ZooidMessage> messages_;
+};
+
+bool extractZooidFrame(std::vector<uint8_t>& buffer,
+                       uint8_t& senderId,
+                       uint8_t& type,
+                       std::vector<uint8_t>& payload);
 
 #endif // ZOOIDMESSAGE_H

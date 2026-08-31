@@ -1,6 +1,20 @@
 ﻿#include "ZooidReceiver.h"
 
+#include <chrono>
+#include <cstring>
 #include <fcntl.h>
+
+namespace
+{
+
+uint64_t receiverSteadyNowMs()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<
+        std::chrono::milliseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+} // namespace
 
 ZooidReceiver::ZooidReceiver()
 {
@@ -9,9 +23,9 @@ ZooidReceiver::ZooidReceiver()
     readyToSend = false;
     bytesToSend = 0;
     initialized = false;
-    bufferIn = vector<char>();
-    bufferOut = vector<char>();
-    incomingMessages = vector<ZooidMessage>();
+    dataReceived = false;
+    receiverSequence = 0;
+    bufferReceivedAtMs = 0;
 }
 
 ZooidReceiver::ZooidReceiver(unsigned int id)
@@ -21,9 +35,9 @@ ZooidReceiver::ZooidReceiver(unsigned int id)
     readyToSend = false;
     bytesToSend = 0;
     initialized = false;
-    bufferIn = vector<char>();
-    bufferOut = vector<char>();
-    incomingMessages = vector<ZooidMessage>();
+    dataReceived = false;
+    receiverSequence = 0;
+    bufferReceivedAtMs = 0;
 }
 
 ZooidReceiver::ZooidReceiver(string descriptor)
@@ -34,9 +48,9 @@ ZooidReceiver::ZooidReceiver(string descriptor)
 
     bytesToSend = 0;
     initialized = false;
-    bufferIn = vector<char>();
-    bufferOut = vector<char>();
-    incomingMessages = vector<ZooidMessage>();
+    dataReceived = false;
+    receiverSequence = 0;
+    bufferReceivedAtMs = 0;
     init(descriptor);
 }
 
@@ -105,9 +119,12 @@ bool ZooidReceiver::connect(string description, int baudrate)
             }
         }
         //握手应答成功 => 配置接收板
-        if(lastMessage.getPayload() && string((char*)lastMessage.getPayload()).compare(HANDSHAKE_REPLY) == 0)
+        if (lastMessage.getLength() == sizeof(HANDSHAKE_REPLY) &&
+            lastMessage.getPayload() != nullptr &&
+            std::memcmp(lastMessage.getPayload(), HANDSHAKE_REPLY,
+                        sizeof(HANDSHAKE_REPLY)) == 0)
         {
-            ReceiverConfigMessage config;
+            ReceiverConfigMessage config{};
             config.receiverId = receiverId;                         //配置接收板ID
             config.numZooids = NUM_ZOOIDS_PER_RECEIVER;             //配置x个Zooid使用一个接收板
             config.updateFrequency = int(SYSTEM_UPDATE_FREQUENCY);  //配置系统刷新频率
@@ -115,26 +132,35 @@ bool ZooidReceiver::connect(string description, int baudrate)
             setReadyToSend();
             return true;
         }
+        disconnect();
     }
     return false;
 }
 
 void ZooidReceiver::usbReceivingRoutine()
 {
-    uint16_t bytesToRead = 0;
     while (threadsRunning)
     {
         Sleep(1);
         if (initialized && serialPort.isOpen())
         {
-            bytesToRead = (uint16_t) serialPort.readBufferLen();
-            if (bytesToRead > MINIMUM_BYTES_TO_READ)
+            const int bytesToRead = serialPort.readBufferLen();
+            if (bytesToRead > 0)
             {
-                char *readData = new char[bytesToRead];
-                if (serialPort.readBuffer(readData) > 0)
+                std::vector<uint8_t> readData(
+                    static_cast<std::size_t>(bytesToRead));
+                const int bytesRead = serialPort.readBuffer(
+                    reinterpret_cast<char*>(readData.data()));
+                if (bytesRead > 0 && bytesRead <= bytesToRead)
                 {
+                    const uint64_t receivedAtMs = receiverSteadyNowMs();
                     unique_lock<mutex> lock(dataInMutex);
-                    bufferIn.insert(bufferIn.end(), readData, readData + bytesToRead);
+                    if (bufferIn.empty())
+                        bufferReceivedAtMs = receivedAtMs;
+                    bufferIn.insert(
+                        bufferIn.end(), readData.begin(),
+                        readData.begin() + bytesRead);
+                    dataReceived = true;
                     lock.unlock();
                     processCond.notify_one();
                 }
@@ -147,55 +173,34 @@ void ZooidReceiver::processIncomingData()
 {
     while (threadsRunning)
     {
-        //锁定数据---防止在接收线程中冲突
         unique_lock<mutex> lock(dataInMutex);
-        //阻塞----接收线程中  如果没有解锁 处理现线程则 阻塞等待
-        processCond.wait(lock, [this]() { return (bufferIn.size() >= 4) | !threadsRunning;});
-        //接收缓冲区有数据 >4
-        if(bufferIn.size() >= 4)
+        processCond.wait(lock, [this]() {
+            return dataReceived || !threadsRunning;
+        });
+        if (!threadsRunning) break;
+        dataReceived = false;
+
+        uint8_t sourceAddr = 0;
+        uint8_t messageType = 0;
+        std::vector<uint8_t> payload;
+        while (extractZooidFrame(
+                   bufferIn, sourceAddr, messageType, payload))
         {
-            //起始标志 协议解析
-            if (bufferIn[0] == '~')
+            const uint64_t sequence = ++receiverSequence;
+            if (messageType == TYPE_RECEIVER_INFO)
             {
-                uint8_t messageType = bufferIn[1];  //帧类型
-                uint8_t sourceAddr = bufferIn[2];   //帧id
-                uint8_t payloadSize = bufferIn[3];  //消息字节
-                //消息接收
-                if ((payloadSize + 4) < bufferIn.size())  //长度校验
-                {
-                    if (bufferIn[payloadSize + 4] == '!') //数据为校验
-                    {
-                        switch (messageType)
-                        {
-                        //连接成功信息--成功握手
-                        case TYPE_RECEIVER_INFO:
-                            receiverId = sourceAddr;
-                            qDebug()<<"Message: ZooidReceiver #"<<receiverId<<" succesfully connected";
-                            break;
-                        default:
-                            uint8_t *payload = new uint8_t[payloadSize];
-                            for (int j = 0; j < payloadSize; j++)
-                            {
-                                payload[j] = bufferIn[j + 4];
-                            }
-                            //添加到消息缓冲
-                            addMessage(ZooidMessage(sourceAddr, messageType, payload));
-                            break;
-                        }
-                        bufferIn.erase(bufferIn.begin(), bufferIn.begin() + payloadSize + 5);
-                    }
-                    else
-                    {
-                        bufferIn.erase(bufferIn.begin());
-                    }
-                }
+                receiverId = sourceAddr;
+                qDebug()<<"Message: ZooidReceiver #"<<receiverId
+                        <<" succesfully connected";
             }
             else
             {
-                bufferIn.erase(bufferIn.begin());
+                addMessage(ZooidMessage(
+                    sourceAddr, messageType, payload.data(), payload.size(),
+                    bufferReceivedAtMs, sequence));
             }
         }
-        lock.unlock();
+        if (bufferIn.empty()) bufferReceivedAtMs = 0;
     }
 }
 
@@ -305,28 +310,16 @@ void ZooidReceiver::sendUSB(uint8_t type, uint8_t dest, uint8_t length, uint8_t 
     }
 }
 
-void ZooidReceiver::addMessage(ZooidMessage m)
+void ZooidReceiver::addMessage(const ZooidMessage& m)
 {
-    unique_lock<mutex> lock(valuesMutex);
-    if (incomingMessages.size() >= NB_MAX_VALUES)
-    {
-        incomingMessages.erase(incomingMessages.begin());
-    }
-    incomingMessages.push_back(m);
-    lock.unlock();
+    lock_guard<mutex> lock(valuesMutex);
+    incomingMessages.push(m);
 }
 
 ZooidMessage ZooidReceiver::getLastMessage()
 {
-    ZooidMessage msg;
-    if(incomingMessages.size()>0)
-    {
-        unique_lock<mutex> lock(valuesMutex);
-        msg = incomingMessages.back();
-        incomingMessages.pop_back();
-        lock.unlock();
-    }
-    return msg;
+    lock_guard<mutex> lock(valuesMutex);
+    return incomingMessages.pop();
 }
 
 int ZooidReceiver::getId()
@@ -336,24 +329,14 @@ int ZooidReceiver::getId()
 
 unsigned int ZooidReceiver::availableMessages()
 {
-    return (unsigned int)incomingMessages.size();
+    lock_guard<mutex> lock(valuesMutex);
+    return static_cast<unsigned int>(incomingMessages.size());
 }
 
 bool ZooidReceiver::isDataReadyToSend()
 {
-    return incomingMessages.size() != 0;
-}
-
-uint8_t *ZooidReceiver::getLastData()
-{
-    if (incomingMessages.size() > 0)
-    {
-        return getLastMessage().ToByteArray();
-    }
-    else
-    {
-        return nullptr;
-    }
+    lock_guard<mutex> lock(valuesMutex);
+    return !incomingMessages.empty();
 }
 
 void ZooidReceiver::reset()
@@ -361,6 +344,9 @@ void ZooidReceiver::reset()
     //serialPort.flush();
     unique_lock<mutex> lock(dataInMutex);
     bufferIn.clear();
+    dataReceived = false;
+    receiverSequence = 0;
+    bufferReceivedAtMs = 0;
     lock.unlock();
 
     unique_lock<mutex> lock2(valuesMutex);
@@ -395,6 +381,8 @@ void ZooidReceiver::disconnect()
 
     unique_lock<mutex> lock(dataInMutex);
     bufferIn.clear();
+    dataReceived = false;
+    bufferReceivedAtMs = 0;
     lock.unlock();
 
     Sleep(200);
@@ -406,9 +394,6 @@ void ZooidReceiver::disconnect()
     unique_lock<mutex> lock2(valuesMutex);
     incomingMessages.clear();
     lock2.unlock();
-
-    incomingMessages.clear();
     serialPort.close();
+    initialized = false;
 }
-
-

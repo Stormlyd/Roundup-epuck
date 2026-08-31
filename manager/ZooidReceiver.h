@@ -24,7 +24,6 @@
 
 using namespace std;
 
-#define MINIMUM_BYTES_TO_READ           5
 #define NB_MAX_VALUES                   20
 
 #define HANDSHAKE_REQUEST "Are you?"            //握手请求数据
@@ -60,14 +59,6 @@ typedef struct {
     uint8_t controlMode;    //控制模式
 
 }PositionControlMessage;//位置控制信息
-
-typedef struct {
-    uint16_t positionX;     //x
-    uint16_t positionY;     //y
-    int16_t orientation;    //方向
-    uint8_t state;          //状态
-    uint8_t batteryLevel;   //电量
-}StatusMessage;//状态信息
 
 typedef struct {
     uint8_t receiverId;     //接受id
@@ -131,7 +122,7 @@ public:
      * @brief 添加一条消息到消息缓冲区中
      * @param m 要添加的信息
      */
-    void addMessage(ZooidMessage m);
+    void addMessage(const ZooidMessage& m);
 
     /**
      * @brief 获取消息缓冲区中最后一条信息
@@ -156,12 +147,6 @@ public:
      * @return 返回ID
      */
     int getId();
-
-    /**
-     * @brief 获取最后一条数据帧
-     * @return  字节
-     */
-    uint8_t* getLastData();
 
     /**
      * @brief 接收器复位
@@ -217,17 +202,19 @@ private:
     ZooidSerialPort serialPort;                         //串口
     mutex dataInMutex, valuesMutex, dataOutMutex;       //并发互斥锁  输入数据 值 输出数据
     std::condition_variable sendingCond, processCond;   //并发编程-条件变量
-    vector<char> bufferIn;                              //输入缓冲buffer
+    vector<uint8_t> bufferIn;                           //输入缓冲buffer
     vector<char> bufferOut;                             //输出缓冲buffer
-    vector<ZooidMessage> incomingMessages;              //消息列表buffer
+    ZooidMessageQueue incomingMessages{NB_MAX_VALUES};  //消息列表buffer
     std::thread processingThread;                       //数据处理线程
     std::thread receivingThread;                        //数据接收线程
     std::thread sendingThread;                          //数据发送线程
     unsigned int bytesToSend;                           //发送数据长度
     bool dataReceived;                                  //数据接收标记
-    bool threadsRunning;                                //线程运行标记
+    std::atomic<bool> threadsRunning;                   //线程运行标记
     bool readyToSend;                                   //准备发送标记
-    bool initialized;
+    std::atomic<bool> initialized;
+    uint64_t receiverSequence;                          //接收器本地完整帧序号
+    uint64_t bufferReceivedAtMs;                        //当前输入批次保守到达时间
     std::atomic<bool> writeFailure{false};
 };
 
