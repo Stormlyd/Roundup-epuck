@@ -27,6 +27,11 @@ bool containsId(const std::vector<unsigned int>& ids, unsigned int id)
 }
 }
 
+void ZooidTestMode::setSlotPolicy(PursuitSlotPolicy* policy)
+{
+    slots_.setPolicy(policy);
+}
+
 bool ZooidTestMode::start(const std::vector<PursuitRobotState>& robots, uint64_t nowMs)
 {
     if (running_) return false;

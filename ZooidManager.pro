@@ -60,6 +60,7 @@ SOURCES += main.cpp\
     manager/ZooidTestTargets.cpp \
     manager/ZooidPursuitRoles.cpp \
     manager/ZooidPursuitGeometry.cpp \
+    manager/ZooidPursuitSlotPolicy.cpp \
     manager/ZooidPursuitStateMachine.cpp \
     manager/ZooidPursuitControl.cpp \
     adminPage.cpp \
@@ -113,6 +114,7 @@ HEADERS  += \
     manager/ZooidPursuitTypes.h \
     manager/ZooidPursuitRoles.h \
     manager/ZooidPursuitGeometry.h \
+    manager/ZooidPursuitSlotPolicy.h \
     manager/ZooidPursuitStateMachine.h \
     manager/ZooidPursuitControl.h \
     adminPage.h \

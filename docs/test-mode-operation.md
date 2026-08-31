@@ -29,6 +29,14 @@
 这些数值是当前离线验证基线，不构成实机“不碰撞”证明。物理保证还取决于坐标
 标定误差、定位延迟、通信抖动、轮速映射、制动距离和底层失联看门狗。
 
+## RL 槽位分配离线基础
+
+当前只有策略接口与 Python 环境合同，没有训练模型或生产推理。动作编码为
+`action = heading_index * 6 + permutation_index`，共 `24 × 6 = 144` 个动作。
+动作非法、不可用或场地不可行时，回退到确定性分配。RL 只输出槽位；后续
+`driveToward`、轮速平滑和最终 CBF 流程保持不变。Python 测试仅验证离线合同，
+不授权实机运行。
+
 ## 本地核心测试
 
 在仓库根目录执行：
@@ -40,7 +48,8 @@ test_dir="$(mktemp -d /tmp/zooid-core.XXXXXX)"
   manager/ZooidMessage.cpp manager/ZooidCoordinates.cpp \
   manager/ZooidCbfSafety.cpp manager/ZooidSpeedCodec.cpp \
   manager/ZooidTestTargets.cpp manager/ZooidPursuitRoles.cpp \
-  manager/ZooidPursuitGeometry.cpp manager/ZooidPursuitStateMachine.cpp \
+  manager/ZooidPursuitSlotPolicy.cpp manager/ZooidPursuitGeometry.cpp \
+  manager/ZooidPursuitStateMachine.cpp \
   manager/ZooidPursuitControl.cpp manager/ZooidTestMode.cpp \
   -o "$test_dir/zooid_core_tests"
 "$test_dir/zooid_core_tests"

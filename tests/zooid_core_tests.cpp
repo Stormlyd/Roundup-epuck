@@ -8,6 +8,7 @@
 #include "../manager/ZooidPursuitGeometry.h"
 #include "../manager/ZooidPursuitStateMachine.h"
 #include "../manager/ZooidPursuitControl.h"
+#include "../manager/ZooidPursuitSlotPolicy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -17,6 +18,49 @@
 #include <vector>
 
 static int failures = 0;
+
+static void testPursuitSlotActionContract()
+{
+    if (PursuitSlotHeadingCount != 24 ||
+        PursuitSlotPermutationCount != 6 ||
+        PursuitSlotActionCount != 144) {
+        std::cerr << "slot-action-constants-changed failed\n";
+        ++failures;
+        return;
+    }
+    const std::array<std::array<int, 3>, 6> expected = {{
+        {{0, 1, 2}}, {{0, 2, 1}}, {{1, 0, 2}},
+        {{1, 2, 0}}, {{2, 0, 1}}, {{2, 1, 0}}
+    }};
+    int heading = 77;
+    std::array<int, 3> permutation = {{8, 7, 6}};
+    if (decodePursuitSlotAction(-1, heading, permutation) ||
+        heading != 77 || permutation != std::array<int, 3>{{8, 7, 6}}) {
+        std::cerr << "invalid-slot-action-mutated-output failed\n";
+        ++failures;
+    }
+    heading = -19;
+    permutation = {{4, 5, 6}};
+    if (decodePursuitSlotAction(144, heading, permutation) ||
+        heading != -19 || permutation != std::array<int, 3>{{4, 5, 6}}) {
+        std::cerr << "upper-invalid-slot-action-mutated-output failed\n";
+        ++failures;
+    }
+    if (!decodePursuitSlotAction(143, heading, permutation) ||
+        heading != 23 || permutation != std::array<int, 3>{{2, 1, 0}}) {
+        std::cerr << "last-slot-action-decoded-incorrectly failed\n";
+        ++failures;
+    }
+    for (int action = 0; action < PursuitSlotActionCount; ++action) {
+        if (!decodePursuitSlotAction(action, heading, permutation) ||
+            heading != action / PursuitSlotPermutationCount ||
+            permutation != expected[action % PursuitSlotPermutationCount]) {
+            std::cerr << "slot-action-contract failed\n";
+            ++failures;
+            break;
+        }
+    }
+}
 
 static ZooidMessage ownedStatusMessage()
 {
@@ -1211,6 +1255,240 @@ static void testSlotAssignmentsPersistAndNeverExpand()
     }
 }
 
+class ScriptedPolicy : public PursuitSlotPolicy
+{
+public:
+    ScriptedPolicy(bool succeeds, int action)
+        : succeeds_(succeeds), action_(action)
+    {
+    }
+
+    bool chooseAction(const PursuitSlotObservation& observation,
+                      int& selectedAction) override
+    {
+        observations.push_back(observation);
+        selectedAction = action_;
+        return succeeds_;
+    }
+
+    std::vector<PursuitSlotObservation> observations;
+
+private:
+    bool succeeds_;
+    int action_;
+};
+
+static bool sameGoals(const std::array<PursuitPose, 3>& first,
+                      const std::array<PursuitPose, 3>& second)
+{
+    for (std::size_t i = 0; i < first.size(); ++i)
+        if (!near(first[i].x, second[i].x) ||
+            !near(first[i].y, second[i].y) ||
+            !near(first[i].yaw, second[i].yaw))
+            return false;
+    return true;
+}
+
+static void testSlotPolicyChoosesExactValidAction()
+{
+    ScriptedPolicy policy(true, 0);
+    PursuitSlotAssigner assigner;
+    assigner.setPolicy(&policy);
+    const PursuitWorldState world = makeGeometryWorld();
+    std::array<PursuitPose, 3> goals;
+    const auto expected = makeTriangularRing(world.target.pose, 0.31, 0.0);
+    if (!assigner.assign(world, PursuitPhase::Pursuit, 0.31, false, goals) ||
+        policy.observations.size() != 1 || !sameGoals(goals, expected)) {
+        std::cerr << "valid-slot-policy-action-not-used failed\n";
+        ++failures;
+    }
+}
+
+static void testSlotPolicyInvalidActionsUseFreshDeterministicFallback()
+{
+    const PursuitWorldState world = makeGeometryWorld();
+    struct PolicyCase { bool succeeds; int action; };
+    const PolicyCase cases[] = {
+        {true, -1}, {true, 144}, {false, 0}, {true, 72}
+    };
+    PursuitWorldState infeasible = world;
+    infeasible.target.pose.x = 0.35;
+    for (const PolicyCase& policyCase : cases) {
+        ScriptedPolicy policy(policyCase.succeeds, policyCase.action);
+        PursuitSlotAssigner assigner;
+        assigner.setPolicy(&policy);
+        std::array<PursuitPose, 3> goals;
+        const PursuitWorldState& candidate = policyCase.action == 72
+            ? infeasible : world;
+        PursuitSlotAssigner reference;
+        std::array<PursuitPose, 3> referenceGoals;
+        if (!reference.assign(candidate, PursuitPhase::Pursuit, 0.31, false,
+                              referenceGoals) ||
+            !assigner.assign(candidate, PursuitPhase::Pursuit, 0.31, false,
+                             goals) ||
+            !sameGoals(goals, referenceGoals)) {
+            std::cerr << "invalid-slot-policy-did-not-fallback failed\n";
+            ++failures;
+        }
+    }
+}
+
+static void testSlotPolicyCannotUseExpandedUiFieldBounds()
+{
+    PursuitWorldState world = makeGeometryWorld();
+    world.target.pose = {
+        ZooidFieldWidth - 0.11, ZooidFieldHeight / 2.0, 0.0};
+    const double radius = 0.31;
+    const auto fallbackRing = makeTriangularRing(
+        world.target.pose, radius,
+        6.0 * 2.0 * 3.14159265358979323846 / PursuitSlotHeadingCount);
+    for (std::size_t i = 0; i < world.pursuers.size(); ++i)
+        world.pursuers[i].pose = fallbackRing[i];
+
+    PursuitSlotAssigner reference;
+    std::array<PursuitPose, 3> referenceGoals;
+    const auto actionZeroGoals = makeTriangularRing(world.target.pose, radius, 0.0);
+    if (!reference.assign(world, PursuitPhase::Pursuit, radius, false,
+                          referenceGoals) ||
+        ringInsideBounds(actionZeroGoals, ZooidFieldWidth, ZooidFieldHeight, 0.057) ||
+        sameGoals(referenceGoals, actionZeroGoals)) {
+        std::cerr << "expanded-field-slot-policy-test-setup failed\n";
+        ++failures;
+        return;
+    }
+
+    ScriptedPolicy policy(true, 0);
+    PursuitSlotAssigner assigner;
+    assigner.setPolicy(&policy);
+    std::array<PursuitPose, 3> goals;
+    if (!assigner.assign(world, PursuitPhase::Pursuit, radius, false, goals) ||
+        policy.observations.size() != 1 || !sameGoals(goals, referenceGoals)) {
+        std::cerr << "expanded-ui-field-authorized-slot-policy-action failed\n";
+        ++failures;
+    }
+}
+
+static void testLearnedRememberedSlotsUseFixedFieldBounds()
+{
+    const double radius = 0.31;
+    PursuitWorldState world = makeGeometryWorld();
+    ScriptedPolicy policy(true, 0);
+    PursuitSlotAssigner assigner;
+    assigner.setPolicy(&policy);
+    std::array<PursuitPose, 3> goals;
+    if (!assigner.assign(world, PursuitPhase::Pursuit, radius, false, goals) ||
+        policy.observations.size() != 1) {
+        std::cerr << "learned-remembered-fixed-field-initialization failed\n";
+        ++failures;
+        return;
+    }
+
+    PursuitWorldState moved = world;
+    moved.target.pose = {
+        ZooidFieldWidth - 0.11, ZooidFieldHeight / 2.0, 0.0};
+    const auto fallbackRing = makeTriangularRing(
+        moved.target.pose, radius,
+        6.0 * 2.0 * 3.14159265358979323846 / PursuitSlotHeadingCount);
+    for (std::size_t i = 0; i < moved.pursuers.size(); ++i)
+        moved.pursuers[i].pose = fallbackRing[i];
+
+    PursuitSlotAssigner reference;
+    std::array<PursuitPose, 3> referenceGoals;
+    const auto actionZeroGoals = makeTriangularRing(moved.target.pose, radius, 0.0);
+    if (!reference.assign(moved, PursuitPhase::Pursuit, radius, false,
+                          referenceGoals) ||
+        ringInsideBounds(actionZeroGoals, ZooidFieldWidth, ZooidFieldHeight, 0.057) ||
+        sameGoals(referenceGoals, actionZeroGoals)) {
+        std::cerr << "learned-remembered-fixed-field-test-setup failed\n";
+        ++failures;
+        return;
+    }
+
+    if (!assigner.assign(moved, PursuitPhase::Pursuit, radius, false, goals) ||
+        policy.observations.size() != 2 || !sameGoals(goals, referenceGoals)) {
+        std::cerr << "learned-remembered-slot-used-expanded-field failed\n";
+        ++failures;
+    }
+}
+
+static void testSlotPolicySkipsNonFiniteObservation()
+{
+    struct InvalidCase
+    {
+        PursuitWorldState world;
+        double radius;
+    };
+    InvalidCase cases[] = {
+        {makeGeometryWorld(), 0.31}, {makeGeometryWorld(), 0.31},
+        {makeGeometryWorld(), 0.31}, {makeGeometryWorld(), 0.31},
+        {makeGeometryWorld(), std::numeric_limits<double>::quiet_NaN()}
+    };
+    cases[0].world.target.vx = std::numeric_limits<double>::quiet_NaN();
+    cases[1].world.pursuers[1].vy = std::numeric_limits<double>::infinity();
+    cases[2].world.target.pose.x = std::numeric_limits<double>::quiet_NaN();
+    cases[3].world.fieldWidth = std::numeric_limits<double>::infinity();
+    for (const InvalidCase& invalidCase : cases) {
+        ScriptedPolicy policy(true, 0);
+        PursuitSlotAssigner assigner;
+        assigner.setPolicy(&policy);
+        PursuitSlotAssigner reference;
+        std::array<PursuitPose, 3> goals;
+        std::array<PursuitPose, 3> referenceGoals;
+        const bool expected = reference.assign(
+            invalidCase.world, PursuitPhase::Pursuit, invalidCase.radius, false,
+            referenceGoals);
+        const bool actual = assigner.assign(
+            invalidCase.world, PursuitPhase::Pursuit, invalidCase.radius, false,
+            goals);
+        if (actual != expected || !policy.observations.empty() ||
+            (actual && !sameGoals(goals, referenceGoals))) {
+            std::cerr << "non-finite-slot-observation-called-policy failed\n";
+            ++failures;
+        }
+    }
+}
+
+static void testSlotPolicyMemoizationClearAndReplacement()
+{
+    const PursuitWorldState world = makeGeometryWorld();
+    ScriptedPolicy first(true, 0);
+    PursuitSlotAssigner assigner;
+    assigner.setPolicy(&first);
+    std::array<PursuitPose, 3> goals;
+    assigner.assign(world, PursuitPhase::Pursuit, 0.31, false, goals);
+    assigner.assign(world, PursuitPhase::Pursuit, 0.31, false, goals);
+    assigner.assign(world, PursuitPhase::Surround, 0.24, false, goals);
+    if (first.observations.size() != 2 ||
+        first.observations[0].previousAction != -1 ||
+        first.observations[1].previousAction != 0 ||
+        first.observations[1].phase != PursuitPhase::Surround ||
+        !near(first.observations[1].radius, 0.24)) {
+        std::cerr << "slot-policy-phase-memoization failed\n";
+        ++failures;
+    }
+
+    assigner.clear();
+    assigner.assign(world, PursuitPhase::Pursuit, 0.31, false, goals);
+    if (first.observations.size() != 3 ||
+        first.observations[2].previousAction != -1) {
+        std::cerr << "slot-policy-clear-did-not-preserve-policy failed\n";
+        ++failures;
+    }
+
+    ScriptedPolicy replacement(true, 6);
+    assigner.setPolicy(&replacement);
+    assigner.assign(world, PursuitPhase::Pursuit, 0.31, false, goals);
+    const auto replacementGoals = makeTriangularRing(
+        world.target.pose, 0.31,
+        2.0 * 3.14159265358979323846 / PursuitSlotHeadingCount);
+    if (replacement.observations.size() != 1 ||
+        replacement.observations[0].previousAction != -1 ||
+        !sameGoals(goals, replacementGoals)) {
+        std::cerr << "replacement-slot-policy-not-immediate failed\n";
+        ++failures;
+    }
+}
+
 static PursuitWorldState makeStateWorld(double radius, uint64_t sequence)
 {
     PursuitWorldState world;
@@ -1589,6 +1867,31 @@ static void testMissionFailsClosedForUnsafeExtraActiveRobot()
     }
 }
 
+static void testLearnedSlotPolicyCannotBypassMissionCbf()
+{
+    ZooidTestMode mode;
+    ScriptedPolicy policy(true, 0);
+    mode.setSlotPolicy(&policy);
+    auto fleet = testFleet(1000);
+    for (auto& robot : fleet)
+        if (robot.id == 29) robot.pose.x = 0.049;
+    if (!mode.start(fleet, 1000)) {
+        std::cerr << "learned-policy-unsafe-extra-start failed\n";
+        ++failures;
+        return;
+    }
+
+    const PursuitControlOutput output = mode.update(
+        fleet, 1050, 1.460, 0.914, 1);
+    if (policy.observations.size() != 1 ||
+        output.fault != PursuitFault::SafetyViolation ||
+        output.event != "safety_stop" || mode.isRunning() ||
+        !hasExactZeroCommandsForActiveFleet(fleet, output.commands)) {
+        std::cerr << "learned-policy-bypassed-mission-cbf failed\n";
+        ++failures;
+    }
+}
+
 static void testMissionCbfUsesFixedConfirmedField()
 {
     ZooidTestMode mode;
@@ -1754,6 +2057,7 @@ static void testMissionStopIsIdempotentAndRestartRebuildsRoles()
 
 int main()
 {
+    testPursuitSlotActionContract();
     testZooidMessageOwnsAndDecodesExactStatusPayload();
     testZooidMessagePreservesExactHandshakePayload();
     testZooidMessageQueueIsBoundedFifo();
@@ -1794,6 +2098,12 @@ int main()
     testTriangularRingUsesHandCheckedGeometry();
     testCaptureGeometryChecksRadiusAndAngularContainment();
     testSlotAssignmentsPersistAndNeverExpand();
+    testSlotPolicyChoosesExactValidAction();
+    testSlotPolicyInvalidActionsUseFreshDeterministicFallback();
+    testSlotPolicyCannotUseExpandedUiFieldBounds();
+    testLearnedRememberedSlotsUseFixedFieldBounds();
+    testSlotPolicySkipsNonFiniteObservation();
+    testSlotPolicyMemoizationClearAndReplacement();
     testStateMachineCompletesThreeFreshObservationStages();
     testDuplicateObservationDoesNotAdvanceDwellEvidence();
     testBrokenSurroundFallsBackToPursuit();
@@ -1807,6 +2117,7 @@ int main()
     testPursuitCommandsLeadAMovingTarget();
     testMissionMapsArbitraryIdsAndZerosExtraRobots();
     testMissionFailsClosedForUnsafeExtraActiveRobot();
+    testLearnedSlotPolicyCannotBypassMissionCbf();
     testMissionCbfUsesFixedConfirmedField();
     testMissionUsesIntervenedCbfCommands();
     testMissionRejectsTooFewAndFaultsAtStaleBoundary();

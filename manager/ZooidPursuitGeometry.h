@@ -5,6 +5,8 @@
 
 #include <array>
 
+class PursuitSlotPolicy;
+
 double normalizeAngle(double angle);
 double distanceBetween(const PursuitPose& first, const PursuitPose& second);
 std::array<PursuitPose, 3> makeTriangularRing(const PursuitPose& target,
@@ -32,6 +34,8 @@ bool surroundGeometrySatisfied(const PursuitPose& target,
 class PursuitSlotAssigner
 {
 public:
+    // Non-owning: policy must outlive this assigner; call setPolicy/assign on one thread.
+    void setPolicy(PursuitSlotPolicy* policy);
     bool assign(const PursuitWorldState& world,
                 PursuitPhase phase,
                 double radius,
@@ -40,9 +44,12 @@ public:
     void clear();
 
 private:
+    PursuitSlotPolicy* policy_ = nullptr;
     PursuitPhase phase_ = PursuitPhase::Idle;
     std::array<double, 3> bearings_{{0.0, 0.0, 0.0}};
     bool remembered_ = false;
+    bool rememberedFromPolicy_ = false;
+    int previousAction_ = -1;
 };
 
 #endif // ZOOIDPURSUITGEOMETRY_H
