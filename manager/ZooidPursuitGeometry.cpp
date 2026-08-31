@@ -1,4 +1,5 @@
 #include "ZooidPursuitGeometry.h"
+#include "ZooidPursuitSlotPolicy.h"
 
 #include <algorithm>
 #include <cmath>
@@ -13,17 +14,37 @@ bool finitePose(const PursuitPose& pose)
     return std::isfinite(pose.x) && std::isfinite(pose.y) && std::isfinite(pose.yaw);
 }
 
-std::array<int, 3> bestPermutation(const PursuitWorldState& world,
-                                   const std::array<PursuitPose, 3>& ring)
+bool finitePolicyInput(const PursuitWorldState& world, double radius)
 {
-    const std::array<std::array<int, 3>, 6> permutations{{
-        {{0, 1, 2}}, {{0, 2, 1}}, {{1, 0, 2}},
-        {{1, 2, 0}}, {{2, 0, 1}}, {{2, 1, 0}}
-    }};
-    std::array<int, 3> best{{0, 1, 2}};
+    if (!finitePose(world.target.pose) || !std::isfinite(world.target.vx) ||
+        !std::isfinite(world.target.vy) || !std::isfinite(world.fieldWidth) ||
+        !std::isfinite(world.fieldHeight) || !std::isfinite(radius))
+        return false;
+    for (const PursuitRobotState& pursuer : world.pursuers)
+        if (!finitePose(pursuer.pose) || !std::isfinite(pursuer.vx) ||
+            !std::isfinite(pursuer.vy))
+            return false;
+    return true;
+}
+
+struct SlotPermutation
+{
+    std::array<int, 3> order{{0, 0, 0}};
+    int index = 0;
+};
+
+SlotPermutation bestPermutation(const PursuitWorldState& world,
+                                const std::array<PursuitPose, 3>& ring)
+{
+    SlotPermutation best;
+    int initialHeading = 0;
+    decodePursuitSlotAction(0, initialHeading, best.order);
     double bestCost = std::numeric_limits<double>::infinity();
-    for (const auto& order : permutations)
+    for (int index = 0; index < PursuitSlotPermutationCount; ++index)
     {
+        int headingIndex = 0;
+        std::array<int, 3> order;
+        if (!decodePursuitSlotAction(index, headingIndex, order)) continue;
         double cost = 0.0;
         for (std::size_t i = 0; i < 3; ++i)
         {
@@ -33,7 +54,8 @@ std::array<int, 3> bestPermutation(const PursuitWorldState& world,
         if (cost < bestCost)
         {
             bestCost = cost;
-            best = order;
+            best.order = order;
+            best.index = index;
         }
     }
     return best;
@@ -137,40 +159,88 @@ bool PursuitSlotAssigner::assign(const PursuitWorldState& world,
     {
         for (std::size_t i = 0; i < 3; ++i)
             goals[i] = makeTriangularRing(world.target.pose, radius, bearings_[i])[0];
-        found = ringInsideBounds(goals, world.fieldWidth, world.fieldHeight, 0.057);
+        found = ringInsideBounds(
+            goals,
+            rememberedFromPolicy_ ? ZooidFieldWidth : world.fieldWidth,
+            rememberedFromPolicy_ ? ZooidFieldHeight : world.fieldHeight,
+            0.057);
     }
 
     if (!found)
     {
-        double bestCost = std::numeric_limits<double>::infinity();
-        for (int sample = 0; sample < 24; ++sample)
+        if (policy_ != nullptr && finitePolicyInput(world, radius))
         {
-            const double heading = static_cast<double>(sample) * 2.0 * Pi / 24.0;
-            const auto ring = makeTriangularRing(world.target.pose, radius, heading);
-            if (!ringInsideBounds(ring, world.fieldWidth, world.fieldHeight, 0.057))
-                continue;
-            const auto order = bestPermutation(world, ring);
-            double cost = 0.0;
-            for (std::size_t i = 0; i < 3; ++i)
+            PursuitSlotObservation observation;
+            observation.world = world;
+            observation.phase = phase;
+            observation.radius = radius;
+            observation.previousAction = previousAction_;
+            int action = -1;
+            int headingIndex = 0;
+            std::array<int, 3> order;
+            if (policy_->chooseAction(observation, action) &&
+                decodePursuitSlotAction(action, headingIndex, order))
             {
-                const double d = distanceBetween(world.pursuers[i].pose, ring[order[i]]);
-                cost += d * d;
-            }
-            if (cost < bestCost)
-            {
-                bestCost = cost;
-                for (std::size_t i = 0; i < 3; ++i)
-                    goals[i] = ring[order[i]];
-                found = true;
+                const auto ring = makeTriangularRing(
+                    world.target.pose, radius,
+                    static_cast<double>(headingIndex) * 2.0 * Pi /
+                    PursuitSlotHeadingCount);
+                if (ringInsideBounds(
+                        ring, ZooidFieldWidth, ZooidFieldHeight, 0.057))
+                {
+                    for (std::size_t i = 0; i < 3; ++i)
+                    {
+                        goals[i] = ring[order[i]];
+                        bearings_[i] = std::atan2(
+                            goals[i].y - world.target.pose.y,
+                            goals[i].x - world.target.pose.x);
+                    }
+                    phase_ = phase;
+                    remembered_ = true;
+                    rememberedFromPolicy_ = true;
+                    previousAction_ = action;
+                    found = true;
+                }
             }
         }
+
         if (!found)
-            return false;
-        phase_ = phase;
-        remembered_ = true;
-        for (std::size_t i = 0; i < 3; ++i)
-            bearings_[i] = std::atan2(goals[i].y - world.target.pose.y,
-                                      goals[i].x - world.target.pose.x);
+        {
+            double bestCost = std::numeric_limits<double>::infinity();
+            for (int sample = 0; sample < PursuitSlotHeadingCount; ++sample)
+            {
+                const double heading = static_cast<double>(sample) * 2.0 * Pi /
+                    PursuitSlotHeadingCount;
+                const auto ring = makeTriangularRing(world.target.pose, radius, heading);
+                if (!ringInsideBounds(ring, world.fieldWidth, world.fieldHeight, 0.057))
+                    continue;
+                const SlotPermutation permutation = bestPermutation(world, ring);
+                double cost = 0.0;
+                for (std::size_t i = 0; i < 3; ++i)
+                {
+                    const double d = distanceBetween(
+                        world.pursuers[i].pose, ring[permutation.order[i]]);
+                    cost += d * d;
+                }
+                if (cost < bestCost)
+                {
+                    bestCost = cost;
+                    for (std::size_t i = 0; i < 3; ++i)
+                        goals[i] = ring[permutation.order[i]];
+                    previousAction_ = sample * PursuitSlotPermutationCount +
+                        permutation.index;
+                    found = true;
+                }
+            }
+            if (!found)
+                return false;
+            phase_ = phase;
+            remembered_ = true;
+            rememberedFromPolicy_ = false;
+            for (std::size_t i = 0; i < 3; ++i)
+                bearings_[i] = std::atan2(goals[i].y - world.target.pose.y,
+                                          goals[i].x - world.target.pose.x);
+        }
     }
 
     if (nonExpanding)
@@ -186,8 +256,18 @@ bool PursuitSlotAssigner::assign(const PursuitWorldState& world,
     return true;
 }
 
+void PursuitSlotAssigner::setPolicy(PursuitSlotPolicy* policy)
+{
+    policy_ = policy;
+    remembered_ = false;
+    rememberedFromPolicy_ = false;
+    previousAction_ = -1;
+}
+
 void PursuitSlotAssigner::clear()
 {
     phase_ = PursuitPhase::Idle;
     remembered_ = false;
+    rememberedFromPolicy_ = false;
+    previousAction_ = -1;
 }

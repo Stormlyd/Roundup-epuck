@@ -7,6 +7,7 @@
 #include <set>
 #include <iterator>
 
+#include "ZooidCoordinates.h"
 #include "ZooidSpeedCodec.h"
 
 ZooidManager::ZooidManager()
@@ -694,9 +695,13 @@ void ZooidManager::serviceTestMode(uint64_t nowMs)
     if (output.phase == PursuitPhase::Captured && output.fault == PursuitFault::None)
         stopReason = TestModeStatus::Completed;
 
-    sendTestCommands(output.commands);
     std::vector<unsigned int> commandIds;
     for (const auto& entry : output.commands) commandIds.push_back(entry.first);
+    {
+        unique_lock<mutex> lock(testModeMutex);
+        testTargets.recordCommanded(commandIds);
+    }
+    sendTestCommands(output.commands);
     flushReceiversForIds(commandIds);
 
     if (stopReason != TestModeStatus::Idle)
@@ -3025,21 +3030,22 @@ void ZooidManager::processReceiversData()
             //接收到状态类型
             if (msg.getType() == TYPE_STATUS)
             {
-                StatusMessage status;
-                memcpy(&status, msg.getPayload(), sizeof(StatusMessage));
-                float robotA = (float)(status.orientation) / 100.0f;
-                float robotX = pfMap((float)status.positionX, COORDINATES_MIN_X, COORDINATES_MAX_X, getWorldWidth(), 0.0f);
-                // Y：相机顶→场地顶(0.914), 相机底→场地底(0)
-                float yNorm = ((float)status.positionY - COORDINATES_MIN_Y) / (COORDINATES_MAX_Y - COORDINATES_MIN_Y);
-                float robotY = getWorldHeight() * yNorm;
-                if(robotX < 0 || robotY < 0 || robotX > getWorldWidth() || robotY > getWorldHeight())
-                {
+                DecodedStatusMessage status;
+                if (!decodeStatusMessage(msg, status))
                     continue;
-                }
+
+                ZooidWorldPoint world;
+                if (!zooidRawToWorld(
+                        status.positionX, status.positionY, world))
+                    continue;
+
+                float robotA = (float)(status.orientation) / 100.0f;
+                float robotX = static_cast<float>(world.x);
+                float robotY = static_cast<float>(world.y);
 
                 unique_lock<mutex> lock(valuesMutex);
                 {
-                    testFeedbackMs[zooidId] = steadyNowMs();
+                    testFeedbackMs[zooidId] = msg.getReceivedAtMs();
                     auto zooid = find_if(myZooids.begin(), myZooids.end(), [&zooidId](Zooid *z) { return z->getId() == zooidId; });
                     if(zooid != myZooids.end())
                     {
@@ -3129,28 +3135,18 @@ void ZooidManager::controlRobotPosition(uint8_t zooidId, float x, float y, QColo
 {
     PositionControlMessage msg{};
 
-    float tmpX = x;
-    float tmpY = y;
+    if (!std::isfinite(x) || !std::isfinite(y))
+        return;
 
-    if(tmpX >= 1000 && tmpY>=1000)
-    {
-        msg.positionX = tmpX;
-        msg.positionY = tmpY;
-    }
-
-    else
-    {
-        //位置校验
-        if (tmpX > getWorldWidth()) tmpX = getWorldWidth();
-        if (tmpX < 0.0f) tmpX = 0.0f;
-        if (tmpY > getWorldHeight()) tmpY = getWorldHeight();
-        if (tmpY < 0.0f) tmpX = 0.0f;
-
-            //位置换算
-        msg.positionX = (uint16_t)pfMap(tmpX, getWorldWidth(), 0.0f, COORDINATES_MIN_X, COORDINATES_MAX_X);
-        msg.positionY = (uint16_t)pfMap(tmpY, getWorldHeight(),0.0f, COORDINATES_MIN_Y, COORDINATES_MAX_Y);
-
-    }
+    ZooidWorldPoint world = {
+        static_cast<double>(x), static_cast<double>(y)
+    };
+    if (world.x < 0.0) world.x = 0.0;
+    if (world.x > ZooidFieldWidth) world.x = ZooidFieldWidth;
+    if (world.y < 0.0) world.y = 0.0;
+    if (world.y > ZooidFieldHeight) world.y = ZooidFieldHeight;
+    if (!zooidWorldToRaw(world, msg.positionX, msg.positionY))
+        return;
 
     msg.colorRed = color.red();
     msg.colorGreen = color.green();

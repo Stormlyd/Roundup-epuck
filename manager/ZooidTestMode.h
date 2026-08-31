@@ -10,6 +10,7 @@
 class ZooidTestMode
 {
 public:
+    void setSlotPolicy(PursuitSlotPolicy* policy);
     bool start(const std::vector<PursuitRobotState>& robots, uint64_t nowMs);
     void stop();
     bool isRunning() const;

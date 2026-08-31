@@ -7,6 +7,7 @@
 #include <string>
 #include <vector>
 
+#include "ZooidCoordinates.h"
 #include "ZooidWheelCommand.h"
 
 enum class PursuitPhase
@@ -26,6 +27,7 @@ enum class PursuitFault
     FeedbackStale,
     InvalidFeedback,
     InvalidGeometry,
+    SafetyViolation,
     ReceiverError,
     ManualStop
 };
@@ -67,8 +69,8 @@ struct PursuitWorldState
 {
     PursuitRobotState target;
     std::array<PursuitRobotState, 3> pursuers;
-    double fieldWidth = 1.90;
-    double fieldHeight = 1.00;
+    double fieldWidth = ZooidFieldWidth;
+    double fieldHeight = ZooidFieldHeight;
     uint64_t stampMs = 0;
     uint64_t sequence = 0;
 };

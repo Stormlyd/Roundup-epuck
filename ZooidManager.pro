@@ -54,10 +54,13 @@ SOURCES += main.cpp\
     manager/ZooidSimulator.cpp \
     manager/ZooidCharge.cpp \
     manager/ZooidTestMode.cpp \
+    manager/ZooidCoordinates.cpp \
+    manager/ZooidCbfSafety.cpp \
     manager/ZooidSpeedCodec.cpp \
     manager/ZooidTestTargets.cpp \
     manager/ZooidPursuitRoles.cpp \
     manager/ZooidPursuitGeometry.cpp \
+    manager/ZooidPursuitSlotPolicy.cpp \
     manager/ZooidPursuitStateMachine.cpp \
     manager/ZooidPursuitControl.cpp \
     adminPage.cpp \
@@ -103,12 +106,15 @@ HEADERS  += \
     manager/ZooidSimulator.h \
     manager/ZooidCharge.h   \
     manager/ZooidTestMode.h \
+    manager/ZooidCoordinates.h \
+    manager/ZooidCbfSafety.h \
     manager/ZooidSpeedCodec.h \
     manager/ZooidTestTargets.h \
     manager/ZooidWheelCommand.h \
     manager/ZooidPursuitTypes.h \
     manager/ZooidPursuitRoles.h \
     manager/ZooidPursuitGeometry.h \
+    manager/ZooidPursuitSlotPolicy.h \
     manager/ZooidPursuitStateMachine.h \
     manager/ZooidPursuitControl.h \
     adminPage.h \
