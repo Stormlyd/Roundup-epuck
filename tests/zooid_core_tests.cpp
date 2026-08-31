@@ -1,4 +1,5 @@
 #include "../manager/ZooidTestMode.h"
+#include "../manager/ZooidCoordinates.h"
 #include "../manager/ZooidSpeedCodec.h"
 #include "../manager/ZooidTestTargets.h"
 #include "../manager/ZooidPursuitRoles.h"
@@ -10,6 +11,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 static int failures = 0;
@@ -95,6 +97,94 @@ static void testRoleAssignmentRejectsTooFewWithoutMutation()
 static bool near(double actual, double expected, double tolerance = 1e-6)
 {
     return std::abs(actual - expected) <= tolerance;
+}
+
+static void testConfirmedFieldAndCoordinateMapping()
+{
+    if (!near(ZooidFieldWidth, 1.460) || !near(ZooidFieldHeight, 0.914)) {
+        std::cerr << "confirmed-field-constants failed\n";
+        ++failures;
+    }
+    if (ZooidRawMinX != 63 || ZooidRawMaxX != 960 ||
+        ZooidRawMinY != 229 || ZooidRawMaxY != 795) {
+        std::cerr << "confirmed-raw-endpoints failed\n";
+        ++failures;
+    }
+
+    struct CoordinateCase
+    {
+        uint16_t rawX;
+        uint16_t rawY;
+        double worldX;
+        double worldY;
+    };
+    const CoordinateCase corners[] = {
+        {63, 229, 1.460, 0.0},
+        {63, 795, 1.460, 0.914},
+        {960, 229, 0.0, 0.0},
+        {960, 795, 0.0, 0.914}
+    };
+    for (const CoordinateCase& corner : corners) {
+        ZooidWorldPoint world{0.0, 0.0};
+        if (!zooidRawToWorld(corner.rawX, corner.rawY, world) ||
+            !near(world.x, corner.worldX) || !near(world.y, corner.worldY)) {
+            std::cerr << "raw-endpoint-mapping failed\n";
+            ++failures;
+        }
+    }
+
+    const ZooidWorldPoint midpoint{ZooidFieldWidth / 2.0, ZooidFieldHeight / 2.0};
+    uint16_t midpointRawX = 0;
+    uint16_t midpointRawY = 0;
+    if (!zooidWorldToRaw(midpoint, midpointRawX, midpointRawY) ||
+        midpointRawX != 512 || midpointRawY != 512) {
+        std::cerr << "world-midpoint-mapping failed\n";
+        ++failures;
+    }
+
+    ZooidWorldPoint rejectedWorld{0.0, 0.0};
+    if (zooidRawToWorld(62, 229, rejectedWorld)) {
+        std::cerr << "out-of-range-raw-coordinate accepted\n";
+        ++failures;
+    }
+    uint16_t rejectedRawX = 0;
+    uint16_t rejectedRawY = 0;
+    if (zooidWorldToRaw({-0.001, 0.0}, rejectedRawX, rejectedRawY)) {
+        std::cerr << "out-of-range-world-coordinate accepted\n";
+        ++failures;
+    }
+    if (zooidWorldToRaw({std::numeric_limits<double>::quiet_NaN(), 0.0},
+                        rejectedRawX, rejectedRawY) ||
+        zooidWorldToRaw({0.0, std::numeric_limits<double>::infinity()},
+                        rejectedRawX, rejectedRawY)) {
+        std::cerr << "non-finite-world-coordinate accepted\n";
+        ++failures;
+    }
+
+    const CoordinateCase roundTrips[] = {
+        {63, 229, 0.0, 0.0},
+        {512, 512, 0.0, 0.0},
+        {960, 795, 0.0, 0.0}
+    };
+    for (const CoordinateCase& source : roundTrips) {
+        ZooidWorldPoint world{0.0, 0.0};
+        uint16_t rawX = 0;
+        uint16_t rawY = 0;
+        if (!zooidRawToWorld(source.rawX, source.rawY, world) ||
+            !zooidWorldToRaw(world, rawX, rawY) ||
+            std::abs(static_cast<int>(rawX) - static_cast<int>(source.rawX)) > 1 ||
+            std::abs(static_cast<int>(rawY) - static_cast<int>(source.rawY)) > 1) {
+            std::cerr << "coordinate-round-trip failed\n";
+            ++failures;
+        }
+    }
+
+    const PursuitWorldState defaultWorld;
+    if (!near(defaultWorld.fieldWidth, 1.460) ||
+        !near(defaultWorld.fieldHeight, 0.914)) {
+        std::cerr << "pursuit-world-field-defaults failed\n";
+        ++failures;
+    }
 }
 
 static void testTriangularRingUsesHandCheckedGeometry()
@@ -606,6 +696,7 @@ int main()
     testTargetSnapshot();
     testRandomHardwareIdsAssignFourLogicalRoles();
     testRoleAssignmentRejectsTooFewWithoutMutation();
+    testConfirmedFieldAndCoordinateMapping();
     testTriangularRingUsesHandCheckedGeometry();
     testCaptureGeometryChecksRadiusAndAngularContainment();
     testSlotAssignmentsPersistAndNeverExpand();
