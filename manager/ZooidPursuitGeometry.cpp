@@ -97,6 +97,24 @@ bool ringInsideBounds(const std::array<PursuitPose, 3>& ring,
     return true;
 }
 
+bool triangularRingFeasible(const PursuitPose& target,
+                            double radius,
+                            double width,
+                            double height,
+                            double margin)
+{
+    if (!finitePose(target) || !std::isfinite(radius) || radius <= 0.0)
+        return false;
+    for (int sample = 0; sample < 24; ++sample)
+    {
+        const double heading = static_cast<double>(sample) * 2.0 * Pi / 24.0;
+        if (ringInsideBounds(makeTriangularRing(target, radius, heading),
+                             width, height, margin))
+            return true;
+    }
+    return false;
+}
+
 bool captureGeometrySatisfied(const PursuitPose& target,
                               const std::array<PursuitPose, 3>& pursuers,
                               double captureRadius,
@@ -137,7 +155,8 @@ bool PursuitSlotAssigner::assign(const PursuitWorldState& world,
     {
         for (std::size_t i = 0; i < 3; ++i)
             goals[i] = makeTriangularRing(world.target.pose, radius, bearings_[i])[0];
-        found = ringInsideBounds(goals, world.fieldWidth, world.fieldHeight, 0.057);
+        found = ringInsideBounds(goals, world.fieldWidth, world.fieldHeight,
+                                 PursuitProfile::BoundaryMargin);
     }
 
     if (!found)
@@ -147,7 +166,8 @@ bool PursuitSlotAssigner::assign(const PursuitWorldState& world,
         {
             const double heading = static_cast<double>(sample) * 2.0 * Pi / 24.0;
             const auto ring = makeTriangularRing(world.target.pose, radius, heading);
-            if (!ringInsideBounds(ring, world.fieldWidth, world.fieldHeight, 0.057))
+            if (!ringInsideBounds(ring, world.fieldWidth, world.fieldHeight,
+                                  PursuitProfile::BoundaryMargin))
                 continue;
             const auto order = bestPermutation(world, ring);
             double cost = 0.0;

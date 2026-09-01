@@ -17,7 +17,8 @@ bool finiteRobot(const PursuitRobotState& robot)
 bool freshRobot(const PursuitRobotState& robot, uint64_t nowMs)
 {
     return robot.connected && robot.activated && finiteRobot(robot) &&
-           nowMs >= robot.feedbackMs && nowMs - robot.feedbackMs < 500;
+           nowMs >= robot.feedbackMs &&
+           nowMs - robot.feedbackMs < PursuitProfile::FeedbackTimeoutMs;
 }
 
 bool containsId(const std::vector<unsigned int>& ids, unsigned int id)
@@ -51,6 +52,20 @@ bool ZooidTestMode::start(const std::vector<PursuitRobotState>& robots, uint64_t
     machine_.start();
     previousTargetMs_ = 0;
     havePreviousTarget_ = false;
+    estimatedTargetVx_ = 0.0;
+    estimatedTargetVy_ = 0.0;
+    lastAcceptedFeedbackMs_ = {{0, 0, 0, 0}};
+    for (const auto& robot : robots)
+    {
+        if (robot.id == roles_.targetId)
+            lastAcceptedFeedbackMs_[0] = robot.feedbackMs;
+        for (std::size_t i = 0; i < roles_.pursuerIds.size(); ++i)
+            if (robot.id == roles_.pursuerIds[i])
+                lastAcceptedFeedbackMs_[i + 1] = robot.feedbackMs;
+    }
+    observationSequence_ = 0;
+    lastOutput_ = {};
+    haveLastOutput_ = false;
     running_ = true;
     return true;
 }
@@ -111,7 +126,8 @@ PursuitControlOutput ZooidTestMode::update(
             return faultOutput(PursuitFault::ParticipantMissing, robots);
         if (!finiteRobot(found->second))
             return faultOutput(PursuitFault::InvalidFeedback, robots);
-        if (nowMs < found->second.feedbackMs || nowMs - found->second.feedbackMs >= 500)
+        if (nowMs < found->second.feedbackMs ||
+            nowMs - found->second.feedbackMs >= PursuitProfile::FeedbackTimeoutMs)
             return faultOutput(PursuitFault::FeedbackStale, robots);
     }
 
@@ -120,20 +136,83 @@ PursuitControlOutput ZooidTestMode::update(
     for (std::size_t i = 0; i < 3; ++i) world.pursuers[i] = byId[roles_.pursuerIds[i]];
     world.fieldWidth = fieldWidth;
     world.fieldHeight = fieldHeight;
-    world.stampMs = nowMs;
-    world.sequence = sequence;
+    const std::array<uint64_t, 4> feedbackStamps{{
+        world.target.feedbackMs,
+        world.pursuers[0].feedbackMs,
+        world.pursuers[1].feedbackMs,
+        world.pursuers[2].feedbackMs
+    }};
+    bool completeFreshObservation = true;
+    for (std::size_t i = 0; i < feedbackStamps.size(); ++i)
+        completeFreshObservation = completeFreshObservation &&
+            feedbackStamps[i] > lastAcceptedFeedbackMs_[i];
+    const uint64_t oldestFeedback = *std::min_element(
+        feedbackStamps.begin(), feedbackStamps.end());
+    completeFreshObservation = completeFreshObservation &&
+        nowMs - oldestFeedback < PursuitProfile::CommandHoldTimeoutMs;
+    (void)sequence;
 
-    if (havePreviousTarget_ && nowMs > previousTargetMs_)
+    if (havePreviousTarget_ && world.target.feedbackMs > previousTargetMs_)
     {
-        const double elapsed = static_cast<double>(nowMs - previousTargetMs_) / 1000.0;
-        world.target.vx = std::max(-0.03, std::min(0.03,
-            (world.target.pose.x - previousTargetPose_.x) / elapsed));
-        world.target.vy = std::max(-0.03, std::min(0.03,
-            (world.target.pose.y - previousTargetPose_.y) / elapsed));
+        const double elapsed = static_cast<double>(
+            world.target.feedbackMs - previousTargetMs_) / 1000.0;
+        double measuredVx = (world.target.pose.x - previousTargetPose_.x) / elapsed;
+        double measuredVy = (world.target.pose.y - previousTargetPose_.y) / elapsed;
+        const double measuredSpeed = std::hypot(measuredVx, measuredVy);
+        if (measuredSpeed > PursuitProfile::TargetVelocityEstimateLimit)
+        {
+            measuredVx *= PursuitProfile::TargetVelocityEstimateLimit / measuredSpeed;
+            measuredVy *= PursuitProfile::TargetVelocityEstimateLimit / measuredSpeed;
+        }
+        const double filterTimeConstant = 0.20;
+        const double alpha = elapsed / (filterTimeConstant + elapsed);
+        estimatedTargetVx_ += alpha * (measuredVx - estimatedTargetVx_);
+        estimatedTargetVy_ += alpha * (measuredVy - estimatedTargetVy_);
+        previousTargetPose_ = world.target.pose;
+        previousTargetMs_ = world.target.feedbackMs;
     }
-    previousTargetPose_ = world.target.pose;
-    previousTargetMs_ = nowMs;
-    havePreviousTarget_ = true;
+    else if (!havePreviousTarget_ || world.target.feedbackMs < previousTargetMs_)
+    {
+        previousTargetPose_ = world.target.pose;
+        previousTargetMs_ = world.target.feedbackMs;
+        estimatedTargetVx_ = 0.0;
+        estimatedTargetVy_ = 0.0;
+        havePreviousTarget_ = true;
+    }
+    world.target.vx = estimatedTargetVx_;
+    world.target.vy = estimatedTargetVy_;
+
+    if (!completeFreshObservation)
+    {
+        PursuitControlOutput output = haveLastOutput_ ? lastOutput_ : PursuitControlOutput{};
+        output.phase = machine_.phase();
+        output.fault = PursuitFault::None;
+        if (nowMs - oldestFeedback >= PursuitProfile::CommandHoldTimeoutMs)
+        {
+            smoother_.clear();
+            output.commands.clear();
+            for (const auto& robot : robots)
+                if (robot.connected && robot.activated)
+                    output.commands[robot.id] = {0, 0};
+            for (unsigned int id : roles_.participantIds())
+                output.commands[id] = {0, 0};
+            lastOutput_ = output;
+            haveLastOutput_ = true;
+        }
+        else
+        {
+            const std::vector<unsigned int> participants = roles_.participantIds();
+            for (const auto& robot : robots)
+                if (robot.connected && robot.activated &&
+                    !containsId(participants, robot.id))
+                    output.commands[robot.id] = {0, 0};
+        }
+        return output;
+    }
+
+    lastAcceptedFeedbackMs_ = feedbackStamps;
+    world.stampMs = *std::min_element(feedbackStamps.begin(), feedbackStamps.end());
+    world.sequence = ++observationSequence_;
 
     const PursuitPhaseResult phaseResult = machine_.update(world);
     PursuitControlOutput output = computePursuitCommands(
@@ -155,6 +234,8 @@ PursuitControlOutput ZooidTestMode::update(
     status_.captureProgress = phaseResult.captureProgress;
     for (std::size_t i = 0; i < 3; ++i)
         status_.targetDistances[i] = distanceBetween(world.target.pose, world.pursuers[i].pose);
+    lastOutput_ = output;
+    haveLastOutput_ = true;
     if (phaseResult.phase == PursuitPhase::Captured) running_ = false;
     return output;
 }

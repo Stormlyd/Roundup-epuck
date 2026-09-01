@@ -74,8 +74,13 @@ int pfRandInt(int in_min, int in_max)
 
 QString pfAppPath()
 {
-    char szFilePath[260];
-    GetModuleFileNameA(nullptr, szFilePath, 260);
-    (strrchr(szFilePath, ('\\')))[1] = 0;//删除文件名，只获得路径
-    return QString::fromStdString(szFilePath);
+    const DWORD maximumWindowsPath = 32768;
+    wchar_t filePath[maximumWindowsPath] = {0};
+    const DWORD length = GetModuleFileNameW(nullptr, filePath, maximumWindowsPath);
+    if (length == 0 || length >= maximumWindowsPath)
+        return QStringLiteral(".\\");
+
+    const QString executablePath = QString::fromWCharArray(filePath, static_cast<int>(length));
+    const int separator = executablePath.lastIndexOf(QLatin1Char('\\'));
+    return separator >= 0 ? executablePath.left(separator + 1) : QStringLiteral(".\\");
 }

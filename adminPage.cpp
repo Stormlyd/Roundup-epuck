@@ -1056,7 +1056,9 @@ void AdminPage::onSavePassBtnClicked()
             return;
          }
      }
-     if(!query.exec("UPDATE `config` SET `password` = " + inputNewPass))
+     query.prepare(QStringLiteral("UPDATE `config` SET `password` = ? WHERE `id` = 1000"));
+     query.addBindValue(inputNewPass);
+     if(!query.exec())
      {
          qDebug()<<"Error: "<< query.lastError();
      }
@@ -1066,7 +1068,8 @@ void AdminPage::onSavePassBtnClicked()
          inputOrigPassEdit->clear();
          aginInputPassEdit->clear();
          inputNewPassEdit->clear();
-         qDebug()<<"Message: password modify success! new password is"<<inputNewPass;
+         homePage->sqlConfig.password = inputNewPass;
+         qDebug()<<"Message: password modify success!";
      }
 }
 

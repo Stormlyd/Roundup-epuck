@@ -106,6 +106,7 @@ HEADERS  += \
     manager/ZooidSpeedCodec.h \
     manager/ZooidTestTargets.h \
     manager/ZooidWheelCommand.h \
+    manager/ZooidPursuitProfile.h \
     manager/ZooidPursuitTypes.h \
     manager/ZooidPursuitRoles.h \
     manager/ZooidPursuitGeometry.h \

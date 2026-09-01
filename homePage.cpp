@@ -1,4 +1,8 @@
 ﻿#include "homePage.h"
+#include <QDir>
+#include <QFileInfo>
+#include <QSet>
+#include <QSqlQuery>
 #include <QStringList>
 
 namespace
@@ -35,11 +39,124 @@ HomePage::~HomePage()
 
 bool HomePage::connectDB()
 {
+    const QFileInfo databaseFile(SQL_PATH);
+    if (!QDir().mkpath(databaseFile.absolutePath()))
+    {
+        qWarning() << "Unable to create database directory:" << databaseFile.absolutePath();
+        return false;
+    }
+
     m_db = QSqlDatabase::addDatabase("QSQLITE");
-    //连接设置
     m_db.setDatabaseName(SQL_PATH);
-    // 打开数据库
-    return m_db.open();
+    if (!m_db.open())
+    {
+        qWarning() << "Unable to open database:" << m_db.lastError();
+        return false;
+    }
+
+    QSqlQuery query(m_db);
+    const QString createConfigTable = QStringLiteral(
+        "CREATE TABLE IF NOT EXISTS `config` ("
+        "`id` INTEGER PRIMARY KEY,"
+        "`EnabelFigureMode` INTEGER NOT NULL DEFAULT 0,"
+        "`EnabelDrawMode` INTEGER NOT NULL DEFAULT 0,"
+        "`EnabelFollowMode` INTEGER NOT NULL DEFAULT 0,"
+        "`goalDisplay` INTEGER NOT NULL DEFAULT 1,"
+        "`batteryDisplay` INTEGER NOT NULL DEFAULT 1,"
+        "`screensaverDisplay` INTEGER NOT NULL DEFAULT 0,"
+        "`circularNumber` INTEGER NOT NULL DEFAULT 8,"
+        "`triangleNumber` INTEGER NOT NULL DEFAULT 3,"
+        "`reactNumber` INTEGER NOT NULL DEFAULT 4,"
+        "`crossNumber` INTEGER NOT NULL DEFAULT 5,"
+        "`hexagonNumber` INTEGER NOT NULL DEFAULT 6,"
+        "`fivepointedNumber` INTEGER NOT NULL DEFAULT 10,"
+        "`FollowTime` INTEGER NOT NULL DEFAULT 60,"
+        "`DrawTime` INTEGER NOT NULL DEFAULT 60,"
+        "`FigureTime` INTEGER NOT NULL DEFAULT 60,"
+        "`password` TEXT NOT NULL DEFAULT 'admin',"
+        "`zoom` REAL NOT NULL DEFAULT 1.0,"
+        "`useTime` INTEGER NOT NULL DEFAULT 0,"
+        "`waitTime` INTEGER NOT NULL DEFAULT 300,"
+        "`battery` INTEGER NOT NULL DEFAULT 20,"
+        "`showCount` INTEGER NOT NULL DEFAULT 0"
+        ")");
+
+    if (!query.exec(createConfigTable))
+    {
+        qWarning() << "Unable to create config table:" << query.lastError();
+        return false;
+    }
+
+    struct ConfigColumn
+    {
+        const char* name;
+        const char* definition;
+    };
+    static const ConfigColumn requiredColumns[] = {
+        {"id", "INTEGER"},
+        {"EnabelFigureMode", "INTEGER NOT NULL DEFAULT 0"},
+        {"EnabelDrawMode", "INTEGER NOT NULL DEFAULT 0"},
+        {"EnabelFollowMode", "INTEGER NOT NULL DEFAULT 0"},
+        {"goalDisplay", "INTEGER NOT NULL DEFAULT 1"},
+        {"batteryDisplay", "INTEGER NOT NULL DEFAULT 1"},
+        {"screensaverDisplay", "INTEGER NOT NULL DEFAULT 0"},
+        {"circularNumber", "INTEGER NOT NULL DEFAULT 8"},
+        {"triangleNumber", "INTEGER NOT NULL DEFAULT 3"},
+        {"reactNumber", "INTEGER NOT NULL DEFAULT 4"},
+        {"crossNumber", "INTEGER NOT NULL DEFAULT 5"},
+        {"hexagonNumber", "INTEGER NOT NULL DEFAULT 6"},
+        {"fivepointedNumber", "INTEGER NOT NULL DEFAULT 10"},
+        {"FollowTime", "INTEGER NOT NULL DEFAULT 60"},
+        {"DrawTime", "INTEGER NOT NULL DEFAULT 60"},
+        {"FigureTime", "INTEGER NOT NULL DEFAULT 60"},
+        {"password", "TEXT NOT NULL DEFAULT 'admin'"},
+        {"zoom", "REAL NOT NULL DEFAULT 1.0"},
+        {"useTime", "INTEGER NOT NULL DEFAULT 0"},
+        {"waitTime", "INTEGER NOT NULL DEFAULT 300"},
+        {"battery", "INTEGER NOT NULL DEFAULT 20"},
+        {"showCount", "INTEGER NOT NULL DEFAULT 0"}
+    };
+
+    QSet<QString> existingColumns;
+    QSqlQuery schemaQuery(m_db);
+    if (!schemaQuery.exec(QStringLiteral("PRAGMA table_info(`config`)")))
+    {
+        qWarning() << "Unable to inspect config table:" << schemaQuery.lastError();
+        return false;
+    }
+    while (schemaQuery.next())
+        existingColumns.insert(schemaQuery.value(1).toString().toLower());
+
+    for (const ConfigColumn& column : requiredColumns)
+    {
+        if (existingColumns.contains(QString::fromLatin1(column.name).toLower()))
+            continue;
+
+        QSqlQuery migrationQuery(m_db);
+        const QString migrationSql = QStringLiteral("ALTER TABLE `config` ADD COLUMN `%1` %2")
+            .arg(QLatin1String(column.name), QLatin1String(column.definition));
+        if (!migrationQuery.exec(migrationSql))
+        {
+            qWarning() << "Unable to migrate config column" << column.name
+                       << migrationQuery.lastError();
+            return false;
+        }
+    }
+
+    QSqlQuery defaultRowQuery(m_db);
+    if (!defaultRowQuery.exec(QStringLiteral("SELECT 1 FROM `config` WHERE `id` = 1000 LIMIT 1")))
+    {
+        qWarning() << "Unable to check default config row:" << defaultRowQuery.lastError();
+        return false;
+    }
+    if (!defaultRowQuery.next() &&
+        !defaultRowQuery.exec(QStringLiteral("INSERT INTO `config` (`id`) VALUES (1000)")))
+    {
+        qWarning() << "Unable to create default config row:" << defaultRowQuery.lastError();
+        return false;
+    }
+
+    return true;
 }
 
 void HomePage::paintEvent(QPaintEvent *)
@@ -661,10 +778,8 @@ void HomePage::updateGraphical(){
 
 void HomePage::readSqlConfigData()
 {
-    QSqlQuery query;
-    QString sql = QString("select * from config where id = 1000");
-    query.exec(sql);
-    if(query.first())
+    QSqlQuery query(m_db);
+    if (query.exec(QStringLiteral("SELECT * FROM `config` WHERE `id` = 1000")) && query.first())
     {
         //读取行
         sqlConfig.EnabelFigureMode = query.value("EnabelFigureMode").toInt();
@@ -691,8 +806,8 @@ void HomePage::readSqlConfigData()
     }
     else
     {
-        //数据库为空，写入一条默认数据
-        query.exec("insert into `config`(`id`) values(1000)");
+        qWarning() << "Using built-in defaults because the config row could not be read:"
+                   << query.lastError();
     }
 }
 

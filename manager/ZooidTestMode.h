@@ -35,6 +35,12 @@ private:
     PursuitPose previousTargetPose_;
     uint64_t previousTargetMs_ = 0;
     bool havePreviousTarget_ = false;
+    double estimatedTargetVx_ = 0.0;
+    double estimatedTargetVy_ = 0.0;
+    std::array<uint64_t, 4> lastAcceptedFeedbackMs_{{0, 0, 0, 0}};
+    uint64_t observationSequence_ = 0;
+    PursuitControlOutput lastOutput_;
+    bool haveLastOutput_ = false;
 };
 
 #endif // ZOOIDTESTMODE_H

@@ -1,24 +1,25 @@
 #ifndef ZOOIDPURSUITSTATEMACHINE_H
 #define ZOOIDPURSUITSTATEMACHINE_H
 
+#include "ZooidPursuitProfile.h"
 #include "ZooidPursuitTypes.h"
 
 struct PursuitConfig
 {
-    double pursuitRadius = 0.36;
-    double pursuitHoldRadius = 0.31;
+    double pursuitRadius = PursuitProfile::PursuitTransitionRadius;
+    double pursuitHoldRadius = PursuitProfile::PursuitHoldRadius;
     int pursuitMinTicks = 35;
-    double surroundRadius = 0.24;
+    double surroundRadius = PursuitProfile::SurroundRadius;
     double surroundTolerance = 0.055;
     int surroundMinTicks = 35;
     double surroundMinAngleGap = 0.9;
     double surroundMaxAngleGap = 3.091592653589793;
-    double captureRadius = 0.17;
+    double captureRadius = PursuitProfile::CaptureRadius;
     double captureMinAngleGap = 1.65;
     double captureMaxAngleGap = 2.60;
     int captureStableTicks = 20;
     int transitionReadyTicks = 3;
-    double pursuitBreakRadius = 0.46;
+    double pursuitBreakRadius = PursuitProfile::PursuitBreakRadius;
     int surroundBreakTicks = 8;
     int captureBreakTicks = 6;
     int captureAcquisitionBreakTicks = 8;

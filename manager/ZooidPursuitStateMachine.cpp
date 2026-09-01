@@ -62,14 +62,9 @@ void PursuitStateMachine::transition(PursuitPhase phase)
 
 bool PursuitStateMachine::ringFeasible(const PursuitWorldState& world, double radius) const
 {
-    for (int sample = 0; sample < 24; ++sample)
-    {
-        const double heading = sample * 6.28318530717958647692 / 24.0;
-        if (ringInsideBounds(makeTriangularRing(world.target.pose, radius, heading),
-                             world.fieldWidth, world.fieldHeight, 0.057))
-            return true;
-    }
-    return false;
+    return triangularRingFeasible(world.target.pose, radius,
+                                  world.fieldWidth, world.fieldHeight,
+                                  PursuitProfile::BoundaryMargin);
 }
 
 PursuitPhaseResult PursuitStateMachine::update(const PursuitWorldState& world)

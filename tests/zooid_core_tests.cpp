@@ -10,6 +10,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <limits>
 #include <vector>
 
 static int failures = 0;
@@ -190,6 +191,31 @@ static void testSlotAssignmentsPersistAndNeverExpand()
     }
 }
 
+static void testSurroundSlotsRestoreNominalRadius()
+{
+    PursuitWorldState world = makeGeometryWorld();
+    const auto innerRing = makeTriangularRing(world.target.pose, 0.15, 0.0);
+    for (std::size_t i = 0; i < 3; ++i)
+        world.pursuers[i].pose = innerRing[i];
+
+    PursuitSlotAssigner assigner;
+    std::array<PursuitPose, 3> goals;
+    if (!assigner.assign(world, PursuitPhase::Surround,
+                         PursuitProfile::SurroundRadius, false, goals)) {
+        std::cerr << "surround-slot-assignment failed\n";
+        ++failures;
+        return;
+    }
+    for (const PursuitPose& goal : goals) {
+        if (!near(distanceBetween(world.target.pose, goal),
+                  PursuitProfile::SurroundRadius)) {
+            std::cerr << "surround-slot-did-not-expand failed\n";
+            ++failures;
+            break;
+        }
+    }
+}
+
 static PursuitWorldState makeStateWorld(double radius, uint64_t sequence)
 {
     PursuitWorldState world;
@@ -338,13 +364,20 @@ static void testReceiverHeadingAndPointController()
 static void testDifferentialDriveSignsLimitsAndSlew()
 {
     const WheelCommand straight = differentialDrive({0.020, 0.0});
-    if (straight.left != 20 || straight.right != 20) {
+    if (straight.left != 155 || straight.right != 155) {
         std::cerr << "differential-straight failed\n";
         ++failures;
     }
     const WheelCommand leftTurn = differentialDrive({0.020, 0.4});
-    if (leftTurn.left != 10 || leftTurn.right != 30) {
+    if (leftTurn.left != 73 || leftTurn.right != 238) {
         std::cerr << "differential-positive-turn failed\n";
+        ++failures;
+    }
+    const WheelCommand calibratedCruise = differentialDrive({0.100, 0.0});
+    const WheelCommand calibratedSpin = differentialDrive({0.0, 1.0});
+    if (calibratedCruise.left != 776 || calibratedCruise.right != 776 ||
+        calibratedSpin.left != -206 || calibratedSpin.right != 206) {
+        std::cerr << "epuck2-drive-calibration failed\n";
         ++failures;
     }
     const WheelCommand saturated = differentialDrive({2.0, 10.0});
@@ -418,6 +451,54 @@ static void testCapturePressureSlowsTargetAndEdgePursuitRemainsFeasible()
         std::cerr << "edge-pursuit-unnecessarily-faulted failed\n";
         ++failures;
     }
+    const PursuitTwist recovery = targetEscapeCommand(edge, PursuitPhase::Pursuit);
+    if (triangularRingFeasible(edge.target.pose,
+                              PursuitProfile::SurroundRadius,
+                              edge.fieldWidth, edge.fieldHeight) ||
+        recovery.linear < PursuitProfile::TargetPursuitSpeed ||
+        !near(recovery.angular, 0.0)) {
+        std::cerr << "edge-target-did-not-return-inward failed\n";
+        ++failures;
+    }
+    PursuitWorldState blockedEdge = edge;
+    blockedEdge.pursuers[0].pose = {0.18, 0.50, 3.14159265358979323846};
+    const PursuitTwist blockedRecovery = targetEscapeCommand(
+        blockedEdge, PursuitPhase::Pursuit);
+    if (!near(blockedRecovery.linear, 0.0)) {
+        std::cerr << "blocked-edge-target-did-not-hold failed\n";
+        ++failures;
+    }
+}
+
+static void testFieldBoundaryBrakePreservesTurning()
+{
+    const double pi = 3.14159265358979323846;
+    const double width = 1.46;
+    const double height = 0.914;
+    const double low = PursuitProfile::BoundaryMargin + 0.010;
+    const double highX = width - PursuitProfile::BoundaryMargin - 0.010;
+    const double highY = height - PursuitProfile::BoundaryMargin - 0.010;
+    const PursuitTwist left = brakeAtFieldBoundary(
+        {low, 0.50, pi}, width, height, {0.10, 0.70});
+    const PursuitTwist right = brakeAtFieldBoundary(
+        {highX, 0.50, 0.0}, width, height, {0.10, 0.70});
+    const PursuitTwist bottom = brakeAtFieldBoundary(
+        {0.73, low, -pi / 2.0}, width, height, {0.10, 0.70});
+    const PursuitTwist top = brakeAtFieldBoundary(
+        {0.73, highY, pi / 2.0}, width, height, {0.10, 0.70});
+    const PursuitTwist inward = brakeAtFieldBoundary(
+        {low, 0.50, 0.0}, width, height, {0.10, 0.70});
+    const double expectedScale = 0.010 / PursuitProfile::BoundaryBrakingBand;
+    if (!near(left.linear, 0.10 * expectedScale) ||
+        !near(right.linear, 0.10 * expectedScale) ||
+        !near(bottom.linear, 0.10 * expectedScale) ||
+        !near(top.linear, 0.10 * expectedScale) ||
+        !near(left.angular, 0.70) || !near(right.angular, 0.70) ||
+        !near(bottom.angular, 0.70) || !near(top.angular, 0.70) ||
+        !near(inward.linear, 0.10) || !near(inward.angular, 0.70)) {
+        std::cerr << "field-boundary-brake failed\n";
+        ++failures;
+    }
 }
 
 static void testCoordinatedControllerUsesRealIdsAndStopsWhenCaptured()
@@ -435,22 +516,21 @@ static void testCoordinatedControllerUsesRealIdsAndStopsWhenCaptured()
         std::cerr << "real-id-command-map failed\n";
         ++failures;
     }
-    bool hasAcceleratedPursuer = false;
-    bool pursuerExceededFivefoldCeiling = false;
+    bool hasCalibratedPursuer = false;
+    bool commandExceededCodecLimit = false;
     for (unsigned int id : roles.pursuerIds) {
         const WheelCommand command = running.commands.at(id);
-        const int forwardAverage =
-            (static_cast<int>(command.left) + static_cast<int>(command.right)) / 2;
-        hasAcceleratedPursuer = hasAcceleratedPursuer || forwardAverage > 30;
-        pursuerExceededFivefoldCeiling = pursuerExceededFivefoldCeiling ||
-            forwardAverage > 50;
+        hasCalibratedPursuer = hasCalibratedPursuer ||
+            std::max(std::abs(command.left), std::abs(command.right)) > 200;
+        commandExceededCodecLimit = commandExceededCodecLimit ||
+            std::abs(command.left) > 1000 || std::abs(command.right) > 1000;
     }
-    if (!hasAcceleratedPursuer) {
-        std::cerr << "pursuer-fivefold-speed-not-applied failed\n";
+    if (!hasCalibratedPursuer) {
+        std::cerr << "pursuer-hardware-calibration-not-applied failed\n";
         ++failures;
     }
-    if (pursuerExceededFivefoldCeiling) {
-        std::cerr << "pursuer-fivefold-speed-ceiling failed\n";
+    if (commandExceededCodecLimit) {
+        std::cerr << "pursuer-command-limit failed\n";
         ++failures;
     }
     smoother.clear();
@@ -507,10 +587,301 @@ static std::vector<PursuitRobotState> testFleet(uint64_t feedbackMs)
     };
 }
 
+struct ClosedLoopResult
+{
+    PursuitPhase phase = PursuitPhase::Idle;
+    PursuitFault fault = PursuitFault::None;
+    bool sawSurround = false;
+    bool sawCapture = false;
+    double elapsedSeconds = 0.0;
+    double minimumTargetPursuerDistance = std::numeric_limits<double>::infinity();
+    double minimumPursuerDistance = std::numeric_limits<double>::infinity();
+    std::array<double, 3> finalTargetDistances{{0.0, 0.0, 0.0}};
+};
+
+static ClosedLoopResult simulateClosedLoop(
+    std::vector<PursuitRobotState> fleet,
+    double fieldWidth,
+    double fieldHeight,
+    int maximumTicks = 1500)
+{
+    ClosedLoopResult result;
+    ZooidTestMode mode;
+    uint64_t nowMs = 1000;
+    for (auto& robot : fleet) robot.feedbackMs = nowMs;
+    if (!mode.start(fleet, nowMs)) {
+        result.fault = mode.statusSnapshot().fault;
+        return result;
+    }
+    const PursuitRoleMap roles = mode.roleMap();
+
+    const auto updateClearances = [&]() {
+        const auto findPose = [&](unsigned int id) -> const PursuitPose* {
+            for (const auto& robot : fleet)
+                if (robot.id == id) return &robot.pose;
+            return nullptr;
+        };
+        const PursuitPose* targetPose = findPose(roles.targetId);
+        if (targetPose == nullptr) return;
+        for (std::size_t i = 0; i < roles.pursuerIds.size(); ++i)
+        {
+            const PursuitPose* first = findPose(roles.pursuerIds[i]);
+            if (first == nullptr) continue;
+            result.finalTargetDistances[i] = distanceBetween(*targetPose, *first);
+            result.minimumTargetPursuerDistance = std::min(
+                result.minimumTargetPursuerDistance,
+                result.finalTargetDistances[i]);
+            for (std::size_t j = i + 1; j < roles.pursuerIds.size(); ++j)
+            {
+                const PursuitPose* second = findPose(roles.pursuerIds[j]);
+                if (second != nullptr)
+                    result.minimumPursuerDistance = std::min(
+                        result.minimumPursuerDistance,
+                        distanceBetween(*first, *second));
+            }
+        }
+    };
+    updateClearances();
+
+    constexpr double timeStep = 0.020;
+    for (int tick = 1; tick <= maximumTicks; ++tick)
+    {
+        nowMs += 20;
+        for (auto& robot : fleet) robot.feedbackMs = nowMs;
+        const PursuitControlOutput output = mode.update(
+            fleet, nowMs, fieldWidth, fieldHeight, static_cast<uint64_t>(tick));
+        result.phase = output.phase;
+        result.fault = output.fault;
+        result.sawSurround = result.sawSurround ||
+            output.phase == PursuitPhase::Surround;
+        result.sawCapture = result.sawCapture ||
+            output.phase == PursuitPhase::Capture;
+        result.elapsedSeconds = static_cast<double>(tick) * timeStep;
+        if (output.fault != PursuitFault::None ||
+            output.phase == PursuitPhase::Captured)
+            return result;
+
+        for (auto& robot : fleet)
+        {
+            const auto found = output.commands.find(robot.id);
+            if (found == output.commands.end()) continue;
+            const double left = found->second.left /
+                PursuitDriveCalibration::WheelUnitsPerMetre;
+            const double right = found->second.right /
+                PursuitDriveCalibration::WheelUnitsPerMetre;
+            const double linear = 0.5 * (left + right);
+            const double angular = (right - left) /
+                PursuitDriveCalibration::WheelBaseMetres;
+            robot.pose.x += linear * std::cos(robot.pose.yaw) * timeStep;
+            robot.pose.y += linear * std::sin(robot.pose.yaw) * timeStep;
+            robot.pose.yaw = normalizeAngle(robot.pose.yaw + angular * timeStep);
+            robot.pose.x = std::max(PursuitProfile::BoundaryMargin,
+                std::min(fieldWidth - PursuitProfile::BoundaryMargin, robot.pose.x));
+            robot.pose.y = std::max(PursuitProfile::BoundaryMargin,
+                std::min(fieldHeight - PursuitProfile::BoundaryMargin, robot.pose.y));
+        }
+        updateClearances();
+    }
+    return result;
+}
+
+static void testDuplicateFleetFeedbackDoesNotAdvanceMission()
+{
+    const PursuitPose target{0.73, 0.457, 0.0};
+    const auto ring = makeTriangularRing(target, PursuitProfile::PursuitHoldRadius, 0.0);
+    std::vector<PursuitRobotState> fleet{
+        testRobot(1, target.x, target.y, 1000),
+        testRobot(2, ring[0].x, ring[0].y, 1000),
+        testRobot(3, ring[1].x, ring[1].y, 1000),
+        testRobot(4, ring[2].x, ring[2].y, 1000)
+    };
+    ZooidTestMode mode;
+    mode.start(fleet, 1000);
+    for (uint64_t sequence = 1; sequence <= 100; ++sequence)
+        mode.update(fleet, 1100, 1.46, 0.914, sequence);
+    if (mode.statusSnapshot().phase != PursuitPhase::Pursuit) {
+        std::cerr << "duplicate-fleet-feedback-advanced-mission failed\n";
+        ++failures;
+        return;
+    }
+
+    PursuitControlOutput output;
+    uint64_t nowMs = 1100;
+    for (uint64_t sequence = 101; sequence <= 140; ++sequence)
+    {
+        nowMs += 20;
+        for (auto& robot : fleet) robot.feedbackMs = nowMs;
+        output = mode.update(fleet, nowMs, 1.46, 0.914, sequence);
+    }
+    if (output.phase != PursuitPhase::Surround) {
+        std::cerr << "fresh-fleet-feedback-did-not-advance failed\n";
+        ++failures;
+    }
+}
+
+static void testPartialFleetFeedbackCountsOnlyCompleteSets()
+{
+    const PursuitPose target{0.73, 0.457, 0.0};
+    const auto ring = makeTriangularRing(target, PursuitProfile::PursuitHoldRadius, 0.0);
+    std::vector<PursuitRobotState> fleet{
+        testRobot(1, target.x, target.y, 1000),
+        testRobot(2, ring[0].x, ring[0].y, 1001),
+        testRobot(3, ring[1].x, ring[1].y, 1002),
+        testRobot(4, ring[2].x, ring[2].y, 1003)
+    };
+    ZooidTestMode mode;
+    mode.start(fleet, 1003);
+    uint64_t sequence = 1;
+    uint64_t stamp = 1003;
+    for (int cycle = 0; cycle < 10; ++cycle)
+    {
+        for (std::size_t index = 0; index < fleet.size(); ++index)
+        {
+            fleet[index].feedbackMs = ++stamp;
+            mode.update(fleet, stamp, 1.46, 0.914, sequence++);
+        }
+    }
+    if (mode.statusSnapshot().phase != PursuitPhase::Pursuit) {
+        std::cerr << "partial-fleet-feedback-overcounted failed\n";
+        ++failures;
+    }
+}
+
+static void testCommandHoldStopsBeforeFeedbackFault()
+{
+    auto fleet = testFleet(1000);
+    ZooidTestMode mode;
+    mode.start(fleet, 1000);
+    for (auto& robot : fleet) robot.feedbackMs = 1020;
+    const PursuitControlOutput moving = mode.update(fleet, 1020, 1.90, 1.00, 1);
+    const PursuitControlOutput held = mode.update(fleet, 1099, 1.90, 1.00, 2);
+    bool changedDuringHold = moving.commands.size() != held.commands.size();
+    for (const auto& entry : moving.commands)
+    {
+        const auto found = held.commands.find(entry.first);
+        changedDuringHold = changedDuringHold || found == held.commands.end() ||
+            found->second.left != entry.second.left ||
+            found->second.right != entry.second.right;
+    }
+    if (changedDuringHold) {
+        std::cerr << "duplicate-feedback-changed-command failed\n";
+        ++failures;
+    }
+
+    const PursuitControlOutput stopped = mode.update(fleet, 1120, 1.90, 1.00, 3);
+    for (const auto& entry : stopped.commands) {
+        if (entry.second.left != 0 || entry.second.right != 0) {
+            std::cerr << "command-hold-timeout-did-not-stop failed\n";
+            ++failures;
+            break;
+        }
+    }
+}
+
+static void testLateFleetCatchUpDoesNotRestartStaleCommand()
+{
+    auto fleet = testFleet(1000);
+    ZooidTestMode mode;
+    mode.start(fleet, 1000);
+    for (auto& robot : fleet) robot.feedbackMs = 1020;
+    mode.update(fleet, 1020, 1.90, 1.00, 1);
+
+    // Three logical participants advance while the fourth is delayed. When
+    // the last packet finally arrives, the other three are already 100 ms
+    // old: this is a complete set, but not a timely set and must stay stopped.
+    for (auto& robot : fleet)
+        if (robot.id != 17) robot.feedbackMs = 1040;
+    mode.update(fleet, 1040, 1.90, 1.00, 2);
+    for (auto& robot : fleet)
+        if (robot.id == 17) robot.feedbackMs = 1140;
+    const PursuitControlOutput stopped = mode.update(
+        fleet, 1140, 1.90, 1.00, 3);
+
+    for (const auto& entry : stopped.commands) {
+        if (entry.second.left != 0 || entry.second.right != 0) {
+            std::cerr << "late-fleet-catch-up-restarted-stale-command failed\n";
+            ++failures;
+            break;
+        }
+    }
+    if (mode.statusSnapshot().phase != PursuitPhase::Pursuit) {
+        std::cerr << "late-fleet-catch-up-advanced-mission failed\n";
+        ++failures;
+    }
+}
+
+static void testClosedLoopCapturesFromWallAndClusterLayouts()
+{
+    std::vector<PursuitRobotState> wallFleet{
+        testRobot(1, 0.08, 0.457, 1000),
+        testRobot(2, 0.35, 0.457, 1000),
+        testRobot(3, 0.30, 0.70, 1000),
+        testRobot(4, 0.30, 0.20, 1000)
+    };
+    wallFleet[1].pose.yaw = 3.14159265358979323846;
+    wallFleet[2].pose.yaw = -2.4;
+    wallFleet[3].pose.yaw = 2.4;
+    const ClosedLoopResult wall = simulateClosedLoop(wallFleet, 1.46, 0.914);
+    if (wall.fault != PursuitFault::None || wall.phase != PursuitPhase::Captured ||
+        !wall.sawSurround || !wall.sawCapture || wall.elapsedSeconds > 30.0 ||
+        wall.minimumTargetPursuerDistance < 0.09 ||
+        wall.minimumPursuerDistance < 0.08) {
+        std::cerr << "wall-layout-closed-loop-capture failed\n";
+        ++failures;
+    }
+
+    std::vector<PursuitRobotState> clusterFleet{
+        testRobot(1, 0.73, 0.457, 1000),
+        testRobot(2, 0.20, 0.357, 1000),
+        testRobot(3, 0.20, 0.457, 1000),
+        testRobot(4, 0.20, 0.557, 1000)
+    };
+    const ClosedLoopResult cluster = simulateClosedLoop(clusterFleet, 1.46, 0.914);
+    if (cluster.fault != PursuitFault::None ||
+        cluster.phase != PursuitPhase::Captured ||
+        !cluster.sawSurround || !cluster.sawCapture ||
+        cluster.elapsedSeconds > 30.0 ||
+        cluster.minimumTargetPursuerDistance < 0.09 ||
+        cluster.minimumPursuerDistance < 0.08) {
+        std::cerr << "cluster-layout-closed-loop-capture failed\n";
+        ++failures;
+    }
+
+    std::vector<PursuitRobotState> blockedWallFleet{
+        testRobot(1, 0.08, 0.457, 1000),
+        testRobot(2, 0.18, 0.457, 1000),
+        testRobot(3, 0.35, 0.70, 1000),
+        testRobot(4, 0.35, 0.20, 1000)
+    };
+    blockedWallFleet[1].pose.yaw = 3.14159265358979323846;
+    blockedWallFleet[2].pose.yaw = -2.4;
+    blockedWallFleet[3].pose.yaw = 2.4;
+    const ClosedLoopResult blockedWall = simulateClosedLoop(
+        blockedWallFleet, 1.46, 0.914, 2000);
+    if (blockedWall.fault != PursuitFault::None ||
+        blockedWall.phase != PursuitPhase::Captured ||
+        !blockedWall.sawSurround || !blockedWall.sawCapture ||
+        blockedWall.elapsedSeconds > 40.0 ||
+        blockedWall.minimumTargetPursuerDistance < 0.08 ||
+        blockedWall.minimumPursuerDistance < 0.08) {
+        std::cerr << "blocked-wall-closed-loop-capture failed phase="
+                  << static_cast<int>(blockedWall.phase)
+                  << " fault=" << static_cast<int>(blockedWall.fault)
+                  << " elapsed=" << blockedWall.elapsedSeconds
+                  << " target-clearance=" << blockedWall.minimumTargetPursuerDistance
+                  << " pursuer-clearance=" << blockedWall.minimumPursuerDistance
+                  << " final-radii=" << blockedWall.finalTargetDistances[0]
+                  << ',' << blockedWall.finalTargetDistances[1]
+                  << ',' << blockedWall.finalTargetDistances[2]
+                  << "\n";
+        ++failures;
+    }
+}
+
 static void testMissionMapsArbitraryIdsAndZerosExtraRobots()
 {
     ZooidTestMode mode;
-    const auto fleet = testFleet(1000);
+    auto fleet = testFleet(1000);
     if (!mode.start(fleet, 1000)) {
         std::cerr << "mission-start-with-four failed\n";
         ++failures;
@@ -521,7 +892,8 @@ static void testMissionMapsArbitraryIdsAndZerosExtraRobots()
         std::cerr << "mission-role-map failed\n";
         ++failures;
     }
-    const PursuitControlOutput output = mode.update(fleet, 1100, 1.90, 1.00, 1);
+    for (auto& robot : fleet) robot.feedbackMs = 1020;
+    const PursuitControlOutput output = mode.update(fleet, 1020, 1.90, 1.00, 1);
     if (output.commands.size() != 5 || output.commands.at(29).left != 0 ||
         output.commands.at(29).right != 0) {
         std::cerr << "extra-robot-not-zero failed\n";
@@ -543,12 +915,12 @@ static void testMissionRejectsTooFewAndFaultsAtStaleBoundary()
     ZooidTestMode mode;
     const auto fleet = testFleet(1000);
     mode.start(fleet, 1000);
-    if (mode.update(fleet, 1499, 1.90, 1.00, 1).fault != PursuitFault::None) {
-        std::cerr << "feedback-499ms-considered-stale failed\n";
+    if (mode.update(fleet, 1249, 1.90, 1.00, 1).fault != PursuitFault::None) {
+        std::cerr << "feedback-249ms-considered-stale failed\n";
         ++failures;
     }
-    if (mode.update(fleet, 1500, 1.90, 1.00, 2).fault != PursuitFault::FeedbackStale) {
-        std::cerr << "feedback-500ms-not-stale failed\n";
+    if (mode.update(fleet, 1250, 1.90, 1.00, 2).fault != PursuitFault::FeedbackStale) {
+        std::cerr << "feedback-250ms-not-stale failed\n";
         ++failures;
     }
 }
@@ -609,6 +981,7 @@ int main()
     testTriangularRingUsesHandCheckedGeometry();
     testCaptureGeometryChecksRadiusAndAngularContainment();
     testSlotAssignmentsPersistAndNeverExpand();
+    testSurroundSlotsRestoreNominalRadius();
     testStateMachineCompletesThreeFreshObservationStages();
     testDuplicateObservationDoesNotAdvanceDwellEvidence();
     testBrokenSurroundFallsBackToPursuit();
@@ -616,10 +989,16 @@ int main()
     testCaptureAcquisitionEscapesBackToPursuit();
     testReceiverHeadingAndPointController();
     testDifferentialDriveSignsLimitsAndSlew();
+    testFieldBoundaryBrakePreservesTurning();
     testTargetEscapeRespectsPhaseSpeedAndTerminalStop();
     testCapturePressureSlowsTargetAndEdgePursuitRemainsFeasible();
     testCoordinatedControllerUsesRealIdsAndStopsWhenCaptured();
     testPursuitCommandsLeadAMovingTarget();
+    testDuplicateFleetFeedbackDoesNotAdvanceMission();
+    testPartialFleetFeedbackCountsOnlyCompleteSets();
+    testCommandHoldStopsBeforeFeedbackFault();
+    testLateFleetCatchUpDoesNotRestartStaleCommand();
+    testClosedLoopCapturesFromWallAndClusterLayouts();
     testMissionMapsArbitraryIdsAndZerosExtraRobots();
     testMissionRejectsTooFewAndFaultsAtStaleBoundary();
     testMissionFreezesRolesAndDoesNotReplaceMissingParticipant();

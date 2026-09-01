@@ -3144,7 +3144,7 @@ void ZooidManager::controlRobotPosition(uint8_t zooidId, float x, float y, QColo
         if (tmpX > getWorldWidth()) tmpX = getWorldWidth();
         if (tmpX < 0.0f) tmpX = 0.0f;
         if (tmpY > getWorldHeight()) tmpY = getWorldHeight();
-        if (tmpY < 0.0f) tmpX = 0.0f;
+        if (tmpY < 0.0f) tmpY = 0.0f;
 
             //位置换算
         msg.positionX = (uint16_t)pfMap(tmpX, getWorldWidth(), 0.0f, COORDINATES_MIN_X, COORDINATES_MAX_X);

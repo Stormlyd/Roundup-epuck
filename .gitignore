@@ -22,6 +22,7 @@ object_script.*
 *.ilk
 moc_*.cpp
 qrc_*.cpp
+*_resource.rc
 
 # IDE and per-user configuration
 .qtc_clangd/

@@ -1,6 +1,7 @@
 #ifndef ZOOIDPURSUITGEOMETRY_H
 #define ZOOIDPURSUITGEOMETRY_H
 
+#include "ZooidPursuitProfile.h"
 #include "ZooidPursuitTypes.h"
 
 #include <array>
@@ -17,6 +18,11 @@ bool ringInsideBounds(const std::array<PursuitPose, 3>& ring,
                       double width,
                       double height,
                       double margin);
+bool triangularRingFeasible(const PursuitPose& target,
+                            double radius,
+                            double width,
+                            double height,
+                            double margin = PursuitProfile::BoundaryMargin);
 bool captureGeometrySatisfied(const PursuitPose& target,
                               const std::array<PursuitPose, 3>& pursuers,
                               double captureRadius,
